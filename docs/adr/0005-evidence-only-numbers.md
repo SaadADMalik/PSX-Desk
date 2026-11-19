@@ -1,6 +1,6 @@
 # ADR 0005: Models cite evidence; code produces every number
 
-**Status:** accepted (Slice 0); verifier lands in Slice 3
+**Status:** accepted; enforced by the claim verifier
 
 ## Context
 Models state plausible numbers and facts from memory. In a financial system, a
@@ -12,8 +12,8 @@ wrong number in a confident sentence is the main failure mode.
 - The model sees `Evidence.prompt_view()`, which leaves out fetch metadata so that
   identical facts give an identical prompt (and therefore a cache hit).
 - Every claim in a `Brief` must cite at least one evidence id (enforced by the schema).
-- Slice 0 checks that cited ids exist. Slice 3 adds a deterministic verifier that
-  checks each figure in a claim against the cited evidence.
+- Cited ids must exist, and a deterministic verifier checks each figure in a claim
+  against the cited evidence (ADR 0009).
 
 ## Observed in the first live run
 The baseline cited real evidence ids, yet:
@@ -23,4 +23,4 @@ The baseline cited real evidence ids, yet:
 - said the price was "near its 50-day SMA" when it was 8% above.
 
 Citation-existence checks catch none of these. That is the evidence for the
-Slice 3 verifier and the bear agent.
+claim verifier and the bear agent (ADR 0009).

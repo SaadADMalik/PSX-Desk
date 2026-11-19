@@ -1,6 +1,6 @@
 # ADR 0010: Evidence by reference, and long-term memory
 
-**Status:** accepted (Slice 3)
+**Status:** accepted
 
 ## Context
 Reports carried their evidence inline. Every hop copied the facts, A2A turned
@@ -29,7 +29,7 @@ replaceable, and the grants show at a glance who can write what.
 - `recall(query, symbol?, k)` and `remember(key, ...)`, append-only and
   idempotent by key (`brief:<run_id>`).
 - Embeddings run locally (fastembed, `BAAI/bge-small-en-v1.5`, 384 dims, CPU),
-  because Groq has no embeddings endpoint and a local model costs no quota. The
+  because the LLM provider has no embeddings endpoint and a local model costs no quota. The
   model is downloaded when the image is built, never at runtime.
 - pgvector inside the existing Postgres rather than a separate vector database:
   one less system, and memories sit next to the runs they came from. No ANN index
@@ -45,8 +45,8 @@ A wrong conclusion stored today becomes "context" tomorrow. So:
 - memory is best effort: if it is down, the brief is still written and the
   `remember` step is recorded as failed.
 
-Known gap: memory is not authenticated, so anything on the Compose network could
-call `remember`. Slice 4 adds signed, scoped tokens.
+Memory calls are authenticated like every other service (ADR 0011): only the
+orchestrator may `remember`; agents may `recall`.
 
 ## Measured (live, 2026-11-16)
 - Second HBL brief: the judge received the first brief as a prior view. Every other
