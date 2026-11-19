@@ -1,0 +1,25 @@
+[project]
+name = "market-data-mcp"
+version = "0.1.0"
+description = "MCP server exposing PSX market data as read-only tools and resources"
+requires-python = ">=3.13"
+dependencies = [
+    "contracts",
+    "agentkit",
+    "marketdata",
+    "mcp>=2.3",
+    "asyncpg>=0.30",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.scripts]
+market-data-mcp = "market_data_mcp.server:run"
+
+[tool.uv.sources]
+contracts = { workspace = true }
+agentkit = { workspace = true }
+marketdata = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"

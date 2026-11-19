@@ -1,0 +1,70 @@
+[project]
+name = "psx-agent-desk"
+version = "0.1.0"
+description = "Multi-agent research and paper-trading desk for the Pakistan Stock Exchange"
+requires-python = ">=3.13"
+dependencies = [
+    "contracts",
+    "agentkit",
+    "marketdata",
+    "llm-gateway",
+    "baseline-agent",
+    "market-data-mcp",
+    "technical-agent",
+    "fundamentals-agent",
+    "orchestrator",
+    "eventbus",
+    "scheduler",
+    "news-agent",
+    "debate-agent",
+    "memory-mcp",
+    "broker-mcp",
+    "portfolio-agent",
+    "dashboard",
+    "advisor-agent",
+    "official-web-mcp",
+]
+
+[tool.uv.workspace]
+members = ["libs/*", "services/*", "agents/*", "mcp_servers/*"]
+
+[tool.uv.sources]
+contracts = { workspace = true }
+agentkit = { workspace = true }
+marketdata = { workspace = true }
+llm-gateway = { workspace = true }
+baseline-agent = { workspace = true }
+market-data-mcp = { workspace = true }
+technical-agent = { workspace = true }
+fundamentals-agent = { workspace = true }
+orchestrator = { workspace = true }
+eventbus = { workspace = true }
+scheduler = { workspace = true }
+news-agent = { workspace = true }
+debate-agent = { workspace = true }
+memory-mcp = { workspace = true }
+broker-mcp = { workspace = true }
+portfolio-agent = { workspace = true }
+dashboard = { workspace = true }
+advisor-agent = { workspace = true }
+official-web-mcp = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "fakeredis[lua]>=2.26",
+    "respx>=0.21",
+    "ruff>=0.7",
+    "testcontainers[postgres]>=4.8",
+    "asyncpg>=0.30",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"

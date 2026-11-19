@@ -1,0 +1,28 @@
+[project]
+name = "orchestrator"
+version = "0.1.0"
+description = "Discovers specialist agents over A2A, fans work out, and synthesises the brief"
+requires-python = ">=3.13"
+dependencies = [
+    "agentkit",
+    "contracts",
+    "eventbus",
+    "asyncpg>=0.30",
+    "redis>=5.2",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+orchestrator = "orchestrator.main:run"
+desk-brief = "orchestrator.cli:main"
+
+[tool.uv.sources]
+agentkit = { workspace = true }
+contracts = { workspace = true }
+eventbus = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"

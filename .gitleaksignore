@@ -1,0 +1,5 @@
+# False positives, by fingerprint (commit:file:rule:line). Each was checked by hand.
+# agentkit auth.py line 88 is the Identity dataclass field's type annotation
+# (the private-key class name), not a secret value.
+77201aa40b651331212c0aa8bb2e8ca93f114434:libs/agentkit/src/agentkit/auth.py:generic-api-key:88
+c51f5f1bcaaf5df40c9969246a548d6857e071ff:.gitleaksignore:generic-api-key:2

@@ -1,0 +1,24 @@
+[project]
+name = "dashboard"
+version = "0.1.0"
+description = "Approvals dashboard: briefs, pending paper trades, portfolio, audit log"
+requires-python = ">=3.13"
+dependencies = [
+    "agentkit",
+    "fastapi>=0.115",
+    "redis>=5.2",
+    "contracts",
+    "httpx>=0.27",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.scripts]
+dashboard = "dashboard.main:run"
+
+[tool.uv.sources]
+agentkit = { workspace = true }
+contracts = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"

@@ -1,0 +1,17 @@
+[project]
+name = "news-agent"
+version = "0.1.0"
+description = "A2A specialist: company announcements (untrusted text), read-only"
+requires-python = ">=3.13"
+dependencies = ["agentkit", "contracts"]
+
+[project.scripts]
+news-agent = "news_agent.main:run"
+
+[tool.uv.sources]
+agentkit = { workspace = true }
+contracts = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"

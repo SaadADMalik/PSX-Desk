@@ -1,0 +1,19 @@
+[project]
+name = "scheduler"
+version = "0.1.0"
+description = "Fires the daily watchlist after PSX closes, as events on the bus"
+requires-python = ">=3.13"
+dependencies = ["contracts", "eventbus", "agentkit", "redis>=5.2", "tzdata"]
+
+[project.scripts]
+scheduler = "scheduler.main:run"
+desk-schedule = "scheduler.main:cli"
+
+[tool.uv.sources]
+contracts = { workspace = true }
+eventbus = { workspace = true }
+agentkit = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"
