@@ -133,3 +133,47 @@ async def test_still_unexplained_after_retry_is_recorded_not_hidden(judge_with):
     out = await debate.judge(payload)
     assert out["brief"]["stance"] == "neutral"  # the judge's call stands...
     assert any("no reason" in d for d in out["dropped"])  # ...but the gap is on record
+
+
+# ---------------------------------------------------------------- case strength
+
+
+def test_case_strength_is_computed_from_weighted_points():
+    from debate_agent.main import _Against, _Weighted, case_strength
+    w = lambda n: _Weighted(text="a point here", evidence_ids=["e1"], weight=n)
+    a = lambda n: _Against(text="a counter point", weight=n)
+    assert case_strength([w(3), w(3), w(2)], [a(1)]) == 0.89
+    assert case_strength([w(2), w(2)], [a(2), a(2)]) == 0.5
+    assert case_strength([w(1)], [a(3), a(3)]) == 0.14
+    assert case_strength([w(3)], []) == 0.75  # nothing named against counts as one weak point
+    assert case_strength([w(3)] * 5, []) == 0.94
+    # different material, different numbers: the point of the change
+    assert len({case_strength([w(x), w(y)], [a(z)])
+                for x in (1, 2, 3) for y in (1, 2, 3) for z in (1, 2, 3)}) >= 8
+
+
+async def test_argue_ignores_dropped_points_when_scoring(monkeypatch):
+    draft = json.dumps({"thesis": "a thesis long enough", "concession": "it is pricey",
+                        "arguments": [{"text": "cheap on P/E", "evidence_ids": ["e1"], "weight": 3},
+                                      {"text": "invented fact", "evidence_ids": ["nope"],
+                                       "weight": 3}],
+                        "against": [{"text": "falling price", "weight": 3}]})
+
+    class Ev:
+        def prompt_view(self):
+            return {"id": "e1"}
+
+    async def ask(system, user, **kw):
+        assert '"confidence"' not in system  # the model is no longer asked for a number
+        return reply(draft), Client([])
+
+    async def evidence(ids):
+        return {"e1": Ev()}
+
+    monkeypatch.setattr(debate, "_ask", ask)
+    monkeypatch.setattr(debate, "fetch_evidence", evidence)
+    out = await debate.bull({"symbol": "HBL", "request_id": "r",
+                             "reports": [report("technical", "bullish").model_dump(mode="json")]})
+    assert out["confidence"] == 0.5  # 3 for vs 3 against; the uncited point is not counted
+    assert len(out["arguments"]) == 1 and "weight" not in out["arguments"][0]
+    assert out["dropped"]

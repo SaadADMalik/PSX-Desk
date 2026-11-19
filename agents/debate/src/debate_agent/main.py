@@ -72,22 +72,21 @@ Make the strongest HONEST {side} case for {symbol} from the material below. Anot
 analyst is independently making the opposite case; a judge will weigh both.
 
 - Argue from the evidence, not from optimism or pessimism.
-- concession: the single strongest point against your side. Judges trust analysts
-  who name it.
-- confidence: how strong the {side} case really is, on this scale:
-    0.2  little in the evidence supports it
-    0.4  some support, but the evidence mostly points the other way
-    0.5  arguable either way
-    0.7  clearly supported, with real points against
-    0.9  overwhelming, very little against
-  Score THIS case from THIS evidence; do not fall back on a habitual number.
-  A weak case honestly rated scores better than a weak case oversold.
+- weight each argument by how much the evidence behind it really carries:
+    1 = weak or indirect   2 = solid   3 = strong and direct
+- against: the 1-3 strongest points in the evidence AGAINST your side, each with
+  the same 1-3 weight. Be as honest about these as about your own arguments:
+  the desk computes how strong your case is from both lists.
+- concession: the single strongest point against your side, in one sentence.
+  Judges trust analysts who name it.
 
 {common}
 
 Reply in plain text with ONLY this JSON object:
-{{"thesis": str, "arguments": [{{"text": str, "evidence_ids": [str, ...]}}, ...],  (1-5 items)
- "concession": str, "confidence": 0..1}}"""
+{{"thesis": str,
+ "arguments": [{{"text": str, "evidence_ids": [str, ...], "weight": 1|2|3}}, ...],  (1-5 items)
+ "against": [{{"text": str, "weight": 1|2|3}}, ...],  (1-3 items)
+ "concession": str}}"""
 
 JUDGE = """You are the head of research on a Pakistan Stock Exchange (PSX) desk. A bull
 and a bear analyst argued opposite sides of {symbol}, independently, from the same
@@ -125,13 +124,39 @@ FEEDBACK = """- IMPORTANT: your previous brief was checked mechanically and thes
 {items}"""
 
 
+class _Weighted(Claim):
+    weight: int = Field(default=2, ge=1, le=3)
+
+
+class _Against(BaseModel):
+    text: str = Field(min_length=5)
+    weight: int = Field(default=2, ge=1, le=3)
+
+
 class _CaseDraft(BaseModel):
     thesis: str = Field(min_length=10)
-    arguments: list[Claim] = Field(min_length=1, max_length=5)
+    arguments: list[_Weighted] = Field(min_length=1, max_length=5)
+    against: list[_Against] = Field(default_factory=list, max_length=3)
     concession: str = Field(min_length=5)
-    confidence: float = Field(ge=0.0, le=1.0)
 
     _cap = field_validator("arguments", mode="before")(lambda v: cap_claims(v, 5))
+    _cap_against = field_validator("against", mode="before")(
+        lambda v: v[:3] if isinstance(v, list) else v)
+
+
+# Measured on the first replay with a 0.2-0.9 scale in the prompt: every bull scored
+# 0.7 and every bear 0.4 (or 0.5), whatever the stock. A model asked for one number
+# picks a familiar one. So it is asked for something it can judge (how much each
+# point carries) and the number is computed: support / (support + opposition).
+
+def case_strength(arguments: list[_Weighted], against: list[_Against]) -> float:
+    """0..1 from weighted points. No opposing points named counts as one weak one:
+    an analyst who sees nothing against their side is not believed outright."""
+    support = sum(a.weight for a in arguments)
+    opposition = sum(a.weight for a in against) or 1
+    if not support:
+        return 0.0
+    return round(min(0.95, max(0.05, support / (support + opposition))), 2)
 
 
 class _JudgeDraft(Brief):
@@ -243,11 +268,13 @@ async def argue(payload: dict, side: Side) -> dict:
     finally:
         await client.aclose()
     dropped: list[str] = []
-    arguments = _grounded(draft.arguments, set(evidence), dropped)
+    kept = _grounded(draft.arguments, set(evidence), dropped)  # dropped points do not count
+    confidence = case_strength(kept, draft.against)
+    arguments = [Claim(text=a.text, evidence_ids=a.evidence_ids) for a in kept]
     if not arguments:
         raise RuntimeError(f"every argument cited unknown evidence: {dropped}")
     return Case(request_id=req.request_id, symbol=req.symbol, side=side, thesis=draft.thesis,
-                arguments=arguments, concession=draft.concession, confidence=draft.confidence,
+                arguments=arguments, concession=draft.concession, confidence=confidence,
                 dropped=dropped, model=resp.model,
                 tokens_used=0 if resp.cached else resp.usage.total_tokens).model_dump(mode="json")
 
