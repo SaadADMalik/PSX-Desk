@@ -26,6 +26,20 @@ function Hl({ text, q }: { text: string; q: string }) {
     p.hit ? <mark key={i} className="rounded-sm bg-primary/25 px-0 text-foreground">{p.text}</mark> : <span key={i}>{p.text}</span>)}</>
 }
 
+type Sort = { key: SortKey; dir: 1 | -1 } | null
+
+function Th({ k, sort, onSort, children, className }: {
+  k: SortKey; sort: Sort; onSort: (k: SortKey) => void; children: React.ReactNode; className?: string
+}) {
+  const Icon = sort?.key === k ? (sort.dir === -1 ? ArrowDown : ArrowUp) : ChevronsUpDown
+  return (
+    <TableHead className={className}>
+      <button onClick={() => onSort(k)} className={cn("inline-flex items-center gap-1 hover:text-foreground",
+        sort?.key === k && "text-foreground")}>{children}<Icon className="size-3 opacity-60" /></button>
+    </TableHead>
+  )
+}
+
 export default function StocksPage() {
   const router = useRouter()
   const { board, stocks, error, isLoading } = useMarket()
@@ -33,7 +47,7 @@ export default function StocksPage() {
   const q = useDeferredValue(query)
   const [view, setView] = useState<View>("all")
   const [sector, setSector] = useState("")
-  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 } | null>(null)
+  const [sort, setSort] = useState<Sort>(null)
   const [shown, setShown] = useState(PAGE)
 
   const sectors = useMemo(() => [...new Set(stocks.map((s) => s.sector).filter(Boolean))].sort(), [stocks])
@@ -62,15 +76,7 @@ export default function StocksPage() {
     setSort((s) => (s?.key === key ? (s.dir === -1 ? { key, dir: 1 } : null) : { key, dir: -1 }))
   }
 
-  function Th({ k, children, className }: { k: SortKey; children: React.ReactNode; className?: string }) {
-    const Icon = sort?.key === k ? (sort.dir === -1 ? ArrowDown : ArrowUp) : ChevronsUpDown
-    return (
-      <TableHead className={className}>
-        <button onClick={() => toggleSort(k)} className={cn("inline-flex items-center gap-1 hover:text-foreground",
-          sort?.key === k && "text-foreground")}>{children}<Icon className="size-3 opacity-60" /></button>
-      </TableHead>
-    )
-  }
+  const th = { sort, onSort: toggleSort }
 
   if (error) return <p className="text-sm text-loss">Could not load the market: {error.message}</p>
 
@@ -120,15 +126,15 @@ export default function StocksPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <Th k="symbol" className="pl-6">Stock</Th>
+                    <Th {...th} k="symbol" className="pl-6">Stock</Th>
                     <TableHead className="hidden xl:table-cell">Sector</TableHead>
-                    <Th k="price" className="text-right">Price</Th>
-                    <Th k="change_pct" className="text-right">Today</Th>
-                    <Th k="change_1y_pct" className="hidden text-right md:table-cell">1 year</Th>
-                    <Th k="pe_ratio" className="hidden text-right lg:table-cell">P/E</Th>
-                    <Th k="dividend_yield" className="hidden text-right lg:table-cell">Div. yield</Th>
-                    <Th k="traded" className="hidden text-right lg:table-cell">Traded / day</Th>
-                    <Th k="volume_avg_30d" className="hidden pr-6 text-right sm:table-cell">Avg volume</Th>
+                    <Th {...th} k="price" className="text-right">Price</Th>
+                    <Th {...th} k="change_pct" className="text-right">Today</Th>
+                    <Th {...th} k="change_1y_pct" className="hidden text-right md:table-cell">1 year</Th>
+                    <Th {...th} k="pe_ratio" className="hidden text-right lg:table-cell">P/E</Th>
+                    <Th {...th} k="dividend_yield" className="hidden text-right lg:table-cell">Div. yield</Th>
+                    <Th {...th} k="traded" className="hidden text-right lg:table-cell">Traded / day</Th>
+                    <Th {...th} k="volume_avg_30d" className="hidden pr-6 text-right sm:table-cell">Avg volume</Th>
                   </TableRow>
                 </TableHeader>
                 <TableBody>

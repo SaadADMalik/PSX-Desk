@@ -231,3 +231,63 @@ async def test_audit_tools_return_structured_results_over_mcp(broker):
         assert (await ts.call("verify_audit"))["ok"] is True
         (entry,) = await ts.call("audit_log")
     assert entry["action"] == "proposal.created" and entry["actor"] == "portfolio-agent"
+
+
+# ---------------------------------------------------------------- marks (portfolio value)
+
+
+class _Held:
+    async def held_symbols(self):
+        return ["HBL", "LUCK", "OGDC"]
+
+
+async def test_marks_price_all_holdings_in_one_batch_when_available():
+    from broker_mcp.server import marks
+
+    class Batch:
+        def __init__(self):
+            self.calls = []
+
+        async def prices(self, symbols):
+            self.calls.append(symbols)
+            return {s: 100.0 for s in symbols}
+
+        async def price(self, symbol):
+            raise AssertionError("one-by-one pricing must not be used")
+
+    q = Batch()
+    assert await marks(_Held(), q, also="MCB") == {s: 100.0 for s in ["HBL", "LUCK", "MCB", "OGDC"]}
+    assert q.calls == [["HBL", "LUCK", "MCB", "OGDC"]]  # one request for every holding
+
+
+async def test_marks_fall_back_to_per_symbol_prices_in_parallel():
+    from broker_mcp.server import marks
+
+    class Single:
+        async def price(self, symbol):
+            return {"HBL": 1.0, "LUCK": 2.0}.get(symbol)
+
+    assert await marks(_Held(), Single()) == {"HBL": 1.0, "LUCK": 2.0, "OGDC": None}
+
+
+async def test_batch_marks_older_than_the_limit_count_as_stale(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from broker_mcp import server
+
+    class FakeToolset:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+        async def call(self, tool, **kw):
+            old = datetime.now(UTC) - timedelta(seconds=server.MAX_MARK_AGE_S + 60)
+            return {"fetched_at": old.isoformat(), "quotes": {"HBL": {"price": 115.0}}}
+
+    monkeypatch.setattr(server, "McpToolset", FakeToolset)
+    assert await server.McpQuotes("x").prices(["HBL"]) == {"HBL": None}

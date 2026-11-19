@@ -18,11 +18,13 @@ its own limits at proposal time and again at fill time.
 Paper only: there is no connection to a real brokerage anywhere in this system.
 """
 
+import asyncio
 import logging
 import os
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Protocol
 
 import uvicorn
@@ -87,11 +89,37 @@ class McpQuotes:
         p = ev["values"].get("price")
         return float(p) if p else None
 
+    async def prices(self, symbols: list[str]) -> dict[str, float | None]:
+        """Marks for many holdings in ONE request (the market-wide quote board, which
+        market-data caches). Valuing a portfolio one live PSX request per holding took
+        6-9 s per page, 38 s cold. Not used for fills: the traded symbol's price still
+        comes from `price()`, which refuses snapshot data."""
+        try:
+            async with McpToolset(self.url, allow={"get_quotes"}) as ts:
+                board = await ts.call("get_quotes", symbols=symbols)
+        except Exception as e:  # noqa: BLE001
+            log.warning("no batch quotes (%s); pricing one by one", e)
+            return {s: await self.price(s) for s in symbols}
+        age = (datetime.now(UTC) - datetime.fromisoformat(board["fetched_at"])).total_seconds()
+        if age > MAX_MARK_AGE_S:
+            return dict.fromkeys(symbols)  # too old to value against: shown as stale
+        return {s: (float(q["price"]) if (q := board["quotes"].get(s)) and q.get("price")
+                    else None) for s in symbols}
+
+
+MAX_MARK_AGE_S = 15 * 60
+
 
 async def marks(store: BrokerStore, quotes: Quotes, also: str | None = None
                 ) -> dict[str, float | None]:
-    symbols = set(await store.held_symbols()) | ({also} if also else set())
-    return {s: await quotes.price(s) for s in sorted(symbols)}
+    symbols = sorted(set(await store.held_symbols()) | ({also} if also else set()))
+    if not symbols:
+        return {}
+    batch = getattr(quotes, "prices", None)
+    if batch:
+        return await batch(symbols)
+    return dict(zip(symbols, await asyncio.gather(*(quotes.price(s) for s in symbols)),
+                    strict=True))
 
 
 def build_server(store: BrokerStore | None = None, quotes: Quotes | None = None,

@@ -1,0 +1,30 @@
+version: 2
+# Weekly update PRs, grouped so there are a few PRs a week, not dozens.
+# Each one runs ci, e2e and security before it can be merged.
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      python: { patterns: ["*"] }
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: npm
+    directory: /web
+    schedule: { interval: weekly }
+    groups:
+      web: { patterns: ["*"] }
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      actions: { patterns: ["*"] }
+
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: monthly }
+  - package-ecosystem: docker
+    directory: /web
+    schedule: { interval: monthly }

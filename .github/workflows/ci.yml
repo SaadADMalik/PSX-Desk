@@ -1,0 +1,57 @@
+name: ci
+
+# Every push and PR: Python lint + the full test suite (unit and Postgres
+# integration tests via testcontainers), and the web app's lint, types and build.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: python · lint + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Install workspace (locked)
+        run: uv sync --locked --all-packages
+      - name: Lint (ruff)
+        run: uv run ruff check .
+      - name: Tests (pytest; Postgres via testcontainers)
+        run: uv run pytest -q
+
+  web:
+    name: web · lint + types + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Lint (eslint)
+        run: npm run lint
+      - name: Types (tsc)
+        run: npm run typecheck
+      - name: Build
+        run: npm run build

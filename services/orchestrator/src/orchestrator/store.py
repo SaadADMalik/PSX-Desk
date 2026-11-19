@@ -267,7 +267,8 @@ class Store:
             "       result->'brief' AS brief, result->'risk' AS risk, "
             "       result->'proposal' AS proposal, result->'cases' AS cases, "
             "       result->'reports' AS reports, result->'prior_views' AS prior_views, "
-            "       result->'verification' AS verification, result->'failures' AS failures "
+            "       result->'verification' AS verification, result->'failures' AS failures, "
+            "       result->'lean' AS lean "
             "FROM workflow_runs WHERE status = 'succeeded' "
             "  AND ($1::text[] IS NULL OR symbol = ANY($1)) "
             "ORDER BY symbol, finished_at DESC", symbols)

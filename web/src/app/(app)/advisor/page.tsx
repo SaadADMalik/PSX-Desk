@@ -80,6 +80,9 @@ export default function AdvisorPage() {
   useEffect(() => {
     try {
       const saved: ChatMsg[] = JSON.parse(localStorage.getItem(KEY) ?? "[]")
+      // Restored after mount on purpose: reading localStorage during render would make
+      // the prerendered HTML and the first client render disagree (hydration error).
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setMessages(saved.map((m) => ({ ...m, streaming: false })))
     } catch { /* ignore */ }
   }, [])
