@@ -1,6 +1,6 @@
 # ADR 0004: PSX data via psxdata, with a last-good snapshot as fallback
 
-**Status:** accepted (Slice 0). Supersedes the plan's "psx-dps as fallback".
+**Status:** accepted. Supersedes the plan's "psx-dps as fallback".
 
 ## Context
 PSX has no official API. `psxdata` scrapes the data portal (dps.psx.com.pk) with

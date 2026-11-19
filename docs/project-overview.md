@@ -15,11 +15,10 @@ Trades fill at real PSX prices with realistic fees and slippage. Nothing is conn
 a brokerage, so no real money moves. Everything it produces is research, not licensed
 financial advice.
 
-### Why it exists
+### Design principles
 
-The project was built to learn how agents communicate and cooperate in enterprise
-multi-agent systems, by building every mechanism explicitly instead of hiding them in
-an agent framework. That means:
+Every mechanism is built explicitly rather than hidden inside an agent framework, so
+each one is visible, testable and traceable:
 
 - the protocols: MCP for tools, A2A for agent-to-agent work;
 - orchestration and durable workflows;
@@ -27,8 +26,8 @@ an agent framework. That means:
 - grounding: stopping models from inventing numbers;
 - security: service identity, least privilege, human approval and an audit trail.
 
-The constraint was **free only**: the Groq free tier for models, open-source software,
-and local Docker.
+The stack is open-source software running in Docker, with models served by an
+OpenAI-compatible LLM provider behind the desk's own gateway.
 
 ### What you can do with it
 
@@ -79,7 +78,7 @@ and local Docker.
                           |   market-data   memory (pgvector)   broker (paper)   streaming)
                           |                                     official-web (search, read)
                           |
-   every model call --> LLM gateway --> Groq (gpt-oss-120b, gpt-oss-20b, Qwen)
+   every model call --> LLM gateway --> LLM provider (large, small and alternate models)
    everything --> OpenTelemetry --> Jaeger;   Postgres: state, evidence, ledger, audit
 ```
 
@@ -101,7 +100,7 @@ traceable. Events are used only at the edges (scheduling, completion notices).
 
 | Service | Kind | Role |
 |---|---|---|
-| `llm-gateway` | HTTP | The only holder of the Groq key. Limits, fallback, cache, ledger, streaming |
+| `llm-gateway` | HTTP | The only holder of the LLM API key. Limits, fallback, cache, ledger, streaming |
 | `orchestrator` | HTTP + worker | Runs each brief as a durable workflow. Makes no model calls itself |
 | `scheduler` | worker | Requests briefs for the watchlist after market close |
 | `market-data` | MCP | PSX prices, indicators, valuation, announcements, live quotes, history; the evidence store |
@@ -132,7 +131,7 @@ The rest is guard rails:
 - a step limit and a token budget per run;
 - tool errors, unknown tools and bad arguments go back to the model as tool output, so
   it can recover instead of crashing;
-- an invalid turn (e.g. calling a tool that does not exist, which Groq rejects with
+- an invalid turn (e.g. calling a tool that does not exist, which the provider rejects with
   `tool_use_failed`) gets one corrective message.
 
 With `on_event` set, every call streams. The loop reports text deltas, each tool it is
@@ -216,7 +215,7 @@ How it reads:
 **Streaming, end to end.**
 
 ```
-Groq --SSE--> gateway /v1/chat/stream --SSE--> agent loop (on_event)
+LLM --SSE--> gateway /v1/chat/stream --SSE--> agent loop (on_event)
   --> advisor: batches text every ~60 ms --> A2A status updates (SendStreamingMessage)
   --> app API /api/chat/stream --SSE--> browser: steps appear live, text types out
 ```
@@ -224,19 +223,19 @@ Groq --SSE--> gateway /v1/chat/stream --SSE--> agent loop (on_event)
 - **Retries only before the first word.** The gateway still retries and falls back
   between models until the first word arrives. After that it commits to that model; a
   broken stream becomes an error, because a retry would repeat text.
-- **Smooth typing.** Groq writes faster than people read, so the browser reveals
+- **Smooth typing.** The model writes faster than people read, so the browser reveals
   buffered text a few characters per frame, faster when there is a backlog.
 
 ### The LLM gateway
 
-**Free-tier limits.** Each model has its own budget:
+**Provider limits.** Each model has its own budget:
 - 30 requests and 8,000 tokens per minute;
 - 1,000 requests and 200,000 tokens per day;
 - Qwen also has a 1,000 output-tokens-per-minute limit, found only in a 429 error body.
 
 **What it does:**
 - **Token buckets in Redis** per model, for requests and tokens per minute plus daily
-  counters, reconciled with Groq's `x-ratelimit-*` headers after every call.
+  counters, reconciled with the provider's `x-ratelimit-*` headers after every call.
 - **Priority lanes:**
   - interactive: may use the whole budget, and waits up to 45 s for quota;
   - pipeline: 85% of the daily budget, waits up to 90 s;
@@ -386,7 +385,7 @@ PSX has no official API.
 | Area | Choice |
 |---|---|
 | Language | Python 3.13 (uv workspace monorepo); TypeScript for the app |
-| Models | Groq free tier: gpt-oss-120b, gpt-oss-20b, Qwen 3.8 27B |
+| Models | OpenAI-compatible LLM provider: a large model, a small model and an alternate family, routed by tier |
 | Agent-to-agent | `a2a-sdk` 1.3 (A2A spec 1.0), including streaming |
 | Tools | `mcp` 2.3: servers over streamable HTTP, scoped by signed tokens |
 | HTTP | FastAPI, httpx, uvicorn |
@@ -415,7 +414,7 @@ config/                   access.toml (permissions), official_sources.toml (allo
 db/migrations             schema, roles and grants, audit triggers
 docs/adr                  twelve decision records
 scripts/                  security drills
-tests/                    205 tests; no network or API key needed
+tests/                    225 tests; no network or API key needed
 ```
 
 ### Testing
@@ -438,13 +437,13 @@ security refusals.
 
 ### Known limits
 
-- **Free-tier speed.** At 8,000 tokens per minute, a multi-step advisor answer that reads
+- **Rate-limited speed.** At 8,000 tokens per minute per model, a multi-step advisor answer that reads
   official pages can take one to two minutes, because each step re-sends the
   conversation and waits for quota. Short questions are much faster.
 - **PSX data** is scraped from undocumented endpoints and can fail; the app then shows
   cached, stale-marked data.
-- **Free web search** can be throttled; the sitemap fallback covers company sites, but
+- **Public web search** can be throttled; the sitemap fallback covers company sites, but
   regulator pages without sitemaps depend on the search engine.
 - **Official sources list** must be updated when a stock is added to the watchlist.
-- **Single user.** The app has one operator account; it's designed for local use, with
-  every port bound to 127.0.0.1.
+- **Access.** The app has one operator account and every port is bound to 127.0.0.1;
+  exposing it beyond the host needs a TLS proxy in front (see ADR 0011).

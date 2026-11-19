@@ -1,6 +1,6 @@
 # Daily token budget
 
-Written before Slice 2 (the scheduled pipeline), from measured usage in the
+Measured from usage in the
 `llm_calls` ledger on 2026-11-16. Re-measure whenever prompts or models change.
 
 ## Measured cost of one multi-agent brief
@@ -17,7 +17,7 @@ Planning figure, assuming a repair in roughly one brief in three:
 
 ## What one day allows
 
-Groq free tier per model: 200,000 tokens/day, 1,000 requests/day, 8,000 tokens/min.
+Provider limits per model: 200,000 tokens/day, 1,000 requests/day, 8,000 tokens/min.
 The `pipeline` lane may use 85% of the daily budget (ADR 0003).
 
 | Model | Pipeline share | Bound by | Briefs/day |
@@ -38,15 +38,7 @@ The small model is the binding constraint, because both specialists use it.
   The workflow engine therefore runs at most 2 briefs at a time.
 - **Re-runs are nearly free**: identical prompts hit the gateway cache.
 
-## Consequences for later slices
-
-- **Backtests (Slice 5)** get 50% of the daily budget, ~31 replayed briefs a day on
-  the small model, and replays of past dates are not cache hits. Backtests must
-  sample dates, spread over several days, or move one specialist onto
-  `qwen/qwen3.8-27b`, which has its own separate 200K budget.
-- Slice 3 adds bull, bear and judge agents: see below.
-
-## Slice 3: the debate desk (re-measured 2026-11-16)
+## The debate desk (re-measured 2026-11-16)
 
 Two scheduled briefs (LUCK, ENGRO) from the ledger, after the fixes below:
 
@@ -59,7 +51,7 @@ Two scheduled briefs (LUCK, ENGRO) from the ledger, after the fixes below:
 | bear | gpt-oss-20b | 1 | ~2,300 |
 | judge | gpt-oss-120b, fell back to 20b | 1 | ~4,400 |
 
-**About 12-14K tokens and 9 calls per brief**, 4x Slice 2. Zero 429s, zero
+**About 12-14K tokens and 9 calls per brief**, 4x the single-synthesis pipeline. Zero 429s, zero
 verifier rejections, LUCK 32 s and ENGRO 106 s at engine concurrency 1.
 
 At 85% pipeline share, gpt-oss-20b carries ~9K of that, so **~18 briefs/day** if
@@ -69,7 +61,7 @@ fits, with less headroom than before.
 ### Limits the documentation doesn't show
 
 - **Qwen has an output-tokens-per-minute limit of 1,000**, found only in a 429 body
-  ("Used 897, Requested 900"). Groq charges it with the *requested* `max_tokens`, not
+  ("Used 897, Requested 900"). The provider charges it with the *requested* `max_tokens`, not
   what is generated, so Qwen fits about one 900-token call a minute. The gateway now
   has an OTPM bucket charged the same way, and skips a model whose OTPM is below the
   request's `max_tokens`. Qwen serves only the bull; the news agent moved to 20b.

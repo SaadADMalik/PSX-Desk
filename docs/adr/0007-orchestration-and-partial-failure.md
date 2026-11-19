@@ -1,6 +1,6 @@
 # ADR 0007: Central orchestration with graceful partial failure
 
-**Status:** accepted (Slice 1)
+**Status:** accepted
 
 ## Context
 A brief needs several specialist analyses. Either one coordinator calls them
@@ -30,8 +30,7 @@ A brief needs several specialist analyses. Either one coordinator calls them
 | Disagreement visible | n/a | yes (technical bullish, fundamentals neutral) |
 
 The quality gains came mostly from *narrower context and narrower prompts per
-specialist*, which is one of the boundaries the plan named. Slice 5 measures it
-properly over many symbols.
+specialist*, which is why each analysis is its own agent with its own tools.
 
 ## Observed bottleneck
 The two specialists run in parallel but share one MCP server whose polite PSX
@@ -41,5 +40,5 @@ resource. Accepted: the limit protects PSX; warm caches remove it.
 
 ## Consequences
 - The flow is easy to read and to trace (one trace, five services).
-- The orchestrator is a single point of coordination and holds the run in memory.
-  Slice 2 makes each step durable and idempotent.
+- The orchestrator is a single point of coordination; each step is durable and
+  idempotent (ADR 0008), so a crash resumes rather than repeats.

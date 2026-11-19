@@ -1,10 +1,10 @@
 # ADR 0011: Service identity with signed tokens, permissions decided by the receiver
 
 ## Context
-Until Slice 4, anything on the Compose network could call anything: an agent could
+Without service identity, anything on the Compose network could call anything: an agent could
 call `remember` on the memory server, a compromised news agent could fetch prices or
 ask the LLM gateway for unlimited tokens, and the gateway's ledger recorded whatever
-`caller` name a request claimed. Slice 4 adds a broker that changes trading state, so
+`caller` name a request claimed. The broker changes trading state, so
 "who is calling, and may they?" must have a real answer at every receiver.
 
 ## Options

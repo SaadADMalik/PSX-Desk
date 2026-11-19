@@ -1,6 +1,6 @@
 # ADR 0006: MCP between agents and tools, A2A between agents
 
-**Status:** accepted (Slice 1)
+**Status:** accepted
 
 ## Context
 Agents need data (prices, valuations) and need to hand work to each other. Both
@@ -34,9 +34,9 @@ hostname. The orchestrator is configured with addresses only.
 - Each specialist sees only its allowlisted MCP tools (technical: price history;
   fundamentals: valuation).
 - A2A task state is in memory per agent; a restarted agent forgets its tasks.
-  Durability belongs to the orchestrator's workflow (Slice 2).
-- No authentication between services yet; they are reachable only inside the
-  Compose network and on 127.0.0.1. Signed, scoped tokens come in Slice 4.
+  Durability belongs to the orchestrator's workflow (ADR 0008).
+- Every call between services is authenticated with signed, scoped tokens
+  (ADR 0011); services are reachable only inside the Compose network and on 127.0.0.1.
 - **What would change our mind:** if every agent were ours and in one language
   forever, plain function calls or REST would be simpler. A2A earns its keep when
   agents are owned, deployed or built separately.

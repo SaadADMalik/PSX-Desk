@@ -1,7 +1,7 @@
 # ADR 0012: A paper broker with separated duties, human approval, and a hash-chained audit log
 
 ## Context
-Slice 3 ends with a verified, risk-gated brief. Slice 4 lets the desk act on one: a
+The desk produces a verified, risk-gated brief. The broker lets it act on one: a
 paper trade. That is the first action with consequences, so three questions have to be
 answered in code rather than by trust: who may propose a trade, who may approve one,
 and how do we know afterwards what happened?
@@ -70,6 +70,6 @@ role.
 - Human authentication is a single local user and password, behind 127.0.0.1. It's
   enough to show the boundary; a real desk would use SSO and per-person accounts.
 - Paper fills ignore order books, partial fills, taxes and circuit breakers. They are
-  good enough to measure decisions in Slice 5, not to estimate real execution costs.
+  good enough to compare decisions, not to estimate real execution costs.
 - Every proposal costs one small-model call, but only for actionable briefs. Most briefs
   aren't actionable, so the token impact is small.

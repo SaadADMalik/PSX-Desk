@@ -1,9 +1,9 @@
 # ADR 0008: Events, durable workflows, and idempotency
 
-**Status:** accepted (Slice 2)
+**Status:** accepted
 
 ## Context
-Slice 1 ran a brief inside one HTTP request, in memory. A crash lost the work, a
+The first orchestrator ran a brief inside one HTTP request, in memory. A crash lost the work, a
 retry repeated it, and nothing could start work except a person.
 
 ## Decisions

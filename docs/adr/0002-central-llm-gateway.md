@@ -1,14 +1,14 @@
 # ADR 0002: Every model call goes through one LLM gateway
 
-**Status:** accepted (Slice 0)
+**Status:** accepted
 
 ## Context
-Groq's free tier limits are per organisation and per model (about 30 req/min,
+The LLM provider's limits are per organisation and per model (about 30 req/min,
 8K tokens/min, 1K req/day, 200K tokens/day). With many agents calling directly,
 each would need the API key, and none would know what the others had spent.
 
 ## Options
-1. Each agent calls Groq directly. Simple; no shared view of quota; key everywhere.
+1. Each agent calls the provider directly. Simple; no shared view of quota; key everywhere.
 2. LiteLLM proxy. Mature; does most of this; hides how it works.
 3. Our own small gateway. More code; every mechanism is ours to explain.
 
