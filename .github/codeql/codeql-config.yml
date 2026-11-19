@@ -1,0 +1,9 @@
+name: psx-desk
+# Security queries only (the quality pack flags every `...` body of a typing.Protocol).
+# Tests are excluded: they build URLs and assert on them on purpose.
+queries:
+  - uses: security-extended
+paths-ignore:
+  - tests/**
+  - web/e2e/**
+  - "**/node_modules/**"

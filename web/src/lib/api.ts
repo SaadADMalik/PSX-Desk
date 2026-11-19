@@ -10,6 +10,9 @@ export class ApiError extends Error {
 async function handle<T>(r: Response): Promise<T> {
   if (r.status === 401 && typeof window !== "undefined" &&
       !window.location.pathname.startsWith("/login")) {
+    // A full page load on purpose: this runs outside React (no router here), and a
+    // reload drops every cached screen of the expired session.
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination
     window.location.href = "/login"
   }
   if (!r.ok) {

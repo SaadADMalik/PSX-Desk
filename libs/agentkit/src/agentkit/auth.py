@@ -85,7 +85,7 @@ def _keys_dir() -> Path:
 @dataclass(frozen=True)
 class Identity:
     name: str
-    key: Ed25519PrivateKey = field(repr=False)
+    key: Ed25519PrivateKey = field(repr=False)  # gitleaks:allow (a type, not a key)
 
     def mint(self, audience: str, ttl_s: int = TOKEN_TTL_S) -> str:
         now = int(time.time())

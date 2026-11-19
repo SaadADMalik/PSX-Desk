@@ -139,7 +139,7 @@ async def history(symbol: str, days: int) -> dict | None:
     try:
         h = await market("get_price_history", symbol=symbol, days=days)
     except Exception as e:  # noqa: BLE001
-        log.warning("no history for %s: %s", symbol, e)
+        log.warning("no history for %r: %s", symbol, e)
         return None
     _history_cache[key] = (time.time(), h)
     return h
@@ -265,7 +265,8 @@ async def no_store(request: Request, call_next):
 
 
 class Login(BaseModel):
-    user: str = Field(max_length=40)
+    # A strict format: the name is written to logs and into the session cookie.
+    user: str = Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9_.@-]+$")
     password: str = Field(max_length=200)
 
 

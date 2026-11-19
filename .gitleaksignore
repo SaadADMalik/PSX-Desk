@@ -1,0 +1,3 @@
+# False positives, by fingerprint (commit:file:rule:line). Each was checked by hand.
+# auth.py: `key: Ed25519PrivateKey = field(...)` is a type annotation, not a secret.
+77201aa40b651331212c0aa8bb2e8ca93f114434:libs/agentkit/src/agentkit/auth.py:generic-api-key:88
