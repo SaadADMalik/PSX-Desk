@@ -15,6 +15,14 @@ updates:
     groups:
       web: { patterns: ["*"] }
     open-pull-requests-limit: 3
+    # Majors that break the toolchain until the ecosystem catches up:
+    # typescript-eslint does not support TypeScript 7 yet, and ESLint 10 needs
+    # eslint-config-next to follow. Upgrade these by hand when it does.
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      - dependency-name: eslint
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
@@ -25,6 +33,12 @@ updates:
   - package-ecosystem: docker
     directory: /
     schedule: { interval: monthly }
+    # Python 3.x releases are "minor" bumps to Dependabot, but onnxruntime (local
+    # embeddings in the memory service) ships wheels months after each one.
+    # Patch updates of the image still come through.
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-minor"]
   - package-ecosystem: docker
     directory: /web
     schedule: { interval: monthly }
