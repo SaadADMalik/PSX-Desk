@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+data/
+runs/
+.keys/
+node_modules/
+.next/
+*.tsbuildinfo
+.claude/
+*.log
