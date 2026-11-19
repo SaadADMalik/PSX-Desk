@@ -1,0 +1,25 @@
+[project]
+name = "official-web-mcp"
+version = "0.1.0"
+description = "MCP server: web search and page reading, restricted in code to official sources"
+requires-python = ">=3.13"
+dependencies = [
+    "agentkit",
+    "mcp>=2.3",
+    "httpx>=0.28",
+    "ddgs>=9.9",
+    "beautifulsoup4>=4.12",
+    "lxml>=5",
+    "pypdf>=5",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.scripts]
+official-web-mcp = "official_web_mcp.server:run"
+
+[tool.uv.sources]
+agentkit = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"

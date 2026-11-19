@@ -1,0 +1,17 @@
+[project]
+name = "portfolio-agent"
+version = "0.1.0"
+description = "A2A agent: turns an actionable brief into a paper-trade proposal"
+requires-python = ">=3.13"
+dependencies = ["agentkit", "contracts"]
+
+[project.scripts]
+portfolio-agent = "portfolio_agent.main:run"
+
+[tool.uv.sources]
+agentkit = { workspace = true }
+contracts = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"

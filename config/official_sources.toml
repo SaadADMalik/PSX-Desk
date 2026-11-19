@@ -1,0 +1,30 @@
+# The only places the advisor may search or read on the web. Enforced in code by the
+# official-web MCP server on every search result and every page fetch (redirects too):
+# a domain not listed here is never returned or opened, whatever the model asks for.
+# A listed domain also covers its subdomains (psx.com.pk covers dps.psx.com.pk).
+
+[regulators]
+"psx.com.pk" = "Pakistan Stock Exchange: listings, company announcements, notices"
+"sbp.org.pk" = "State Bank of Pakistan: monetary policy, banking rules, rates"
+"secp.gov.pk" = "Securities and Exchange Commission of Pakistan"
+"finance.gov.pk" = "Ministry of Finance: budget, economic survey"
+"pbs.gov.pk" = "Pakistan Bureau of Statistics: inflation, trade, output"
+"nepra.org.pk" = "Power regulator: tariffs (power and energy companies)"
+"ogra.org.pk" = "Oil and gas regulator: prices, licences"
+"pta.gov.pk" = "Telecom regulator"
+"cdc.com.pk" = "Central Depository Company"
+
+# Each listed company's own website: annual reports, investor relations, press releases.
+# Add a line when you add a stock to your watchlist. `aliases`: words that identify the
+# company in a question, so a search finds its site even without the right ticker.
+[companies]
+LUCK = { domain = "lucky-cement.com", name = "Lucky Cement", aliases = ["lucky cement"] }
+ENGRO = { domain = "engro.com", name = "Engro Corporation", aliases = ["engro"] }
+HBL = { domain = "hbl.com", name = "Habib Bank", aliases = ["habib bank", "hbl"] }
+OGDC = { domain = "ogdcl.com", name = "Oil and Gas Development Company", aliases = ["ogdc", "ogdcl"] }
+PPL = { domain = "ppl.com.pk", name = "Pakistan Petroleum", aliases = ["pakistan petroleum"] }
+MCB = { domain = "mcb.com.pk", name = "MCB Bank", aliases = ["mcb"] }
+FFC = { domain = "ffc.com.pk", name = "Fauji Fertilizer", aliases = ["fauji fertilizer", "ffc"] }
+SYS = { domain = "systemsltd.com", name = "Systems Limited", aliases = ["systems limited", "systems ltd"] }
+HUBC = { domain = "hubpower.com", name = "Hub Power", aliases = ["hub power", "hubco"] }
+MEBL = { domain = "meezanbank.com", name = "Meezan Bank", aliases = ["meezan"] }

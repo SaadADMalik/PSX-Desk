@@ -1,0 +1,30 @@
+[project]
+name = "agentkit"
+version = "0.1.0"
+description = "Hand-written agent loop, LLM gateway client, structured output, and tracing"
+requires-python = ">=3.13"
+dependencies = [
+    "contracts",
+    "httpx>=0.27",
+    "pydantic>=2.9",
+    "opentelemetry-api>=1.28",
+    "opentelemetry-sdk>=1.28",
+    "opentelemetry-exporter-otlp-proto-http>=1.28",
+    "opentelemetry-instrumentation-httpx>=0.49b0",
+    "mcp>=2.3",
+    "a2a-sdk[http-server]>=1.3",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "opentelemetry-instrumentation-fastapi>=0.49b0",
+    "pyjwt[crypto]>=2.10",
+]
+
+[project.scripts]
+desk-keygen = "agentkit.auth:keygen"
+
+[tool.uv.sources]
+contracts = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"

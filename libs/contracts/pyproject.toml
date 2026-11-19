@@ -1,0 +1,10 @@
+[project]
+name = "contracts"
+version = "0.1.0"
+description = "Typed, versioned messages shared by every service"
+requires-python = ">=3.13"
+dependencies = ["pydantic>=2.9"]
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"

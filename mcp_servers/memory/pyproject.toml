@@ -1,0 +1,22 @@
+[project]
+name = "memory-mcp"
+version = "0.1.0"
+description = "MCP server: the desk's long-term memory (pgvector + local embeddings)"
+requires-python = ">=3.13"
+dependencies = [
+    "agentkit",
+    "mcp>=2.3",
+    "asyncpg>=0.30",
+    "fastembed>=0.7",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.scripts]
+memory-mcp = "memory_mcp.server:run"
+
+[tool.uv.sources]
+agentkit = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"

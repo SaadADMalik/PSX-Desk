@@ -1,0 +1,17 @@
+[project]
+name = "technical-agent"
+version = "0.1.0"
+description = "A2A specialist: trend, momentum and risk from price history"
+requires-python = ">=3.13"
+dependencies = ["agentkit", "contracts"]
+
+[project.scripts]
+technical-agent = "technical_agent.main:run"
+
+[tool.uv.sources]
+agentkit = { workspace = true }
+contracts = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"

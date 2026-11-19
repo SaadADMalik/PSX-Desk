@@ -1,0 +1,72 @@
+# Who may call what. One file, so the whole permission model can be reviewed at once.
+#
+#   [receiver]               the service that enforces this section
+#   caller = ["scope", ...]  what that caller may do there
+#
+# Identity is proven by the caller's signature (an Ed25519-signed JWT, 60 s life,
+# audience = the receiver). Permission is decided here, by the receiver: a caller
+# cannot grant itself a scope. Anyone not listed is refused, even with a valid token.
+#
+# Changing this file changes permissions on the next service restart.
+# `operator` is you, on the host (CLIs such as desk-brief and the baseline agent).
+
+[llm-gateway]
+technical-agent = ["llm:chat"]
+fundamentals-agent = ["llm:chat"]
+news-agent = ["llm:chat"]
+debate-agent = ["llm:chat"]
+portfolio-agent = ["llm:chat"]
+advisor-agent = ["llm:chat"]
+operator = ["llm:chat"]
+
+[market-data]
+technical-agent = ["market:read"]
+fundamentals-agent = ["market:read"]
+news-agent = ["news:read"]                 # announcements only: no prices, no evidence store
+debate-agent = ["evidence:read"]
+orchestrator = ["evidence:read"]
+portfolio-agent = ["market:read", "evidence:read"]
+broker = ["market:read"]                   # fills at the current quote
+dashboard = ["market:read"]                # charts and the live price board
+advisor-agent = ["market:read", "news:read", "evidence:read"]
+operator = ["market:read", "news:read", "evidence:read"]
+
+[official-web]
+advisor-agent = ["web:read"]             # official sources only, enforced by the server
+operator = ["web:read"]
+
+[memory]
+debate-agent = ["memory:read"]
+orchestrator = ["memory:write"]            # only after the verifier and the risk gate
+advisor-agent = ["memory:read"]
+operator = ["memory:read"]
+
+[broker]
+portfolio-agent = ["broker:read", "broker:propose"]   # can propose, never execute
+dashboard = ["broker:read", "broker:decide", "broker:trade", "audit:read"]  # the human's hand
+advisor-agent = ["broker:read", "broker:propose"]  # suggests; you approve
+operator = ["broker:read", "audit:read"]
+
+# A2A agents: only the orchestrator assigns work.
+[technical-agent]
+orchestrator = ["agent:call"]
+
+[fundamentals-agent]
+orchestrator = ["agent:call"]
+
+[news-agent]
+orchestrator = ["agent:call"]
+
+[debate-agent]
+orchestrator = ["agent:call"]
+
+[portfolio-agent]
+orchestrator = ["agent:call"]
+
+[advisor-agent]
+dashboard = ["agent:call"]                 # you, chatting through the app
+
+[orchestrator]
+operator = ["briefs:write", "runs:read"]
+dashboard = ["runs:read", "briefs:write"]   # "research this stock" from the app
+advisor-agent = ["runs:read", "briefs:write"]

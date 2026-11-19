@@ -1,0 +1,23 @@
+[project]
+name = "broker-mcp"
+version = "0.1.0"
+description = "MCP server: the paper broker (proposals, human decisions, fills, audit log)"
+requires-python = ">=3.13"
+dependencies = [
+    "agentkit",
+    "contracts",
+    "mcp>=2.3",
+    "asyncpg>=0.30",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.scripts]
+broker-mcp = "broker_mcp.server:run"
+
+[tool.uv.sources]
+agentkit = { workspace = true }
+contracts = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"

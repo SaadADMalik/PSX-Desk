@@ -1,0 +1,386 @@
+# Slice 0 infrastructure.
+# Published ports bind to 127.0.0.1 only: nothing here is reachable from your network.
+# Postgres and Redis are not published at all; only containers on this network reach them.
+
+name: psx-agent-desk
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: psx
+      POSTGRES_USER: psx_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U psx_admin -d psx"]
+      interval: 5s
+      retries: 20
+
+  migrate: # one-shot: applies db/migrations, then exits
+    image: pgvector/pgvector:pg17
+    entrypoint: ["sh", "/migrate.sh"]
+    environment:
+      POSTGRES_DB: psx
+      POSTGRES_USER: psx_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      GATEWAY_DB_PASSWORD: ${GATEWAY_DB_PASSWORD:?set GATEWAY_DB_PASSWORD in .env}
+      ORCHESTRATOR_DB_PASSWORD: ${ORCHESTRATOR_DB_PASSWORD:?set ORCHESTRATOR_DB_PASSWORD in .env}
+      MARKET_DATA_DB_PASSWORD: ${MARKET_DATA_DB_PASSWORD:?set MARKET_DATA_DB_PASSWORD in .env}
+      MEMORY_DB_PASSWORD: ${MEMORY_DB_PASSWORD:?set MEMORY_DB_PASSWORD in .env}
+      BROKER_DB_PASSWORD: ${BROKER_DB_PASSWORD:?set BROKER_DB_PASSWORD in .env}
+    volumes:
+      - ./db/migrate.sh:/migrate.sh:ro
+      - ./db/migrations:/migrations:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+
+  jaeger:
+    image: jaegertracing/jaeger:2.11.0
+    ports:
+      - "127.0.0.1:16686:16686" # trace UI
+      - "127.0.0.1:4318:4318" # OTLP/HTTP, so host-side CLIs can send traces
+
+  llm-gateway:
+    build:
+      context: .
+      args:
+        PACKAGE: llm-gateway
+    command: ["llm-gateway"]
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://gateway:${GATEWAY_DB_PASSWORD}@postgres:5432/psx
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      SERVICE_NAME: llm-gateway
+      AUTH_REQUIRED: "1"
+      KEYS_DIR: /run/keys
+    volumes:
+      - ./config/access.toml:/app/config/access.toml:ro
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/llm-gateway.key:/run/keys/private/llm-gateway.key:ro
+    ports:
+      - "127.0.0.1:8100:8000"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      jaeger: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      retries: 10
+
+  # ---- Slice 1: protocols -------------------------------------------------
+
+  market-data: # MCP server (agent -> tool)
+    build: { context: ., args: { PACKAGE: market-data-mcp } }
+    command: ["market-data-mcp"]
+    environment:
+      SNAPSHOT_DIR: /app/data/snapshots
+      MCP_ALLOWED_HOSTS: market-data:8000,127.0.0.1:*,localhost:*
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      # Owns the evidence table: SELECT + INSERT there, nothing else.
+      DATABASE_URL: postgresql://market_data:${MARKET_DATA_DB_PASSWORD}@postgres:5432/psx
+      SERVICE_NAME: market-data
+      AUTH_REQUIRED: "1"
+      KEYS_DIR: /run/keys
+    volumes:
+      - mdsnapshots:/app/data
+      - ./config/access.toml:/app/config/access.toml:ro
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/market-data.key:/run/keys/private/market-data.key:ro
+    ports:
+      - "127.0.0.1:8300:8000" # for the MCP Inspector: http://127.0.0.1:8300/mcp
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck: &tcp-health
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8000), 2)"]
+      interval: 5s
+      retries: 20
+
+  technical-agent: # A2A service (agent <- orchestrator)
+    build: { context: ., args: { PACKAGE: technical-agent } }
+    command: ["technical-agent"]
+    environment: &agent-env
+      LLM_GATEWAY_URL: http://llm-gateway:8000
+      MARKET_DATA_MCP_URL: http://market-data:8000/mcp
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      PUBLIC_URL: http://technical-agent:8000/
+      AUTH_REQUIRED: "1"
+      KEYS_DIR: /run/keys
+      SERVICE_NAME: technical-agent
+    volumes:
+      - ./config/access.toml:/app/config/access.toml:ro
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/technical-agent.key:/run/keys/private/technical-agent.key:ro
+    ports:
+      - "127.0.0.1:8401:8000" # card: http://127.0.0.1:8401/.well-known/agent-card.json
+    depends_on: &agent-deps
+      llm-gateway: { condition: service_healthy }
+      market-data: { condition: service_healthy }
+    healthcheck: *tcp-health
+
+  fundamentals-agent:
+    build: { context: ., args: { PACKAGE: fundamentals-agent } }
+    command: ["fundamentals-agent"]
+    environment:
+      <<: *agent-env
+      PUBLIC_URL: http://fundamentals-agent:8000/
+      SERVICE_NAME: fundamentals-agent
+    volumes:
+      - ./config/access.toml:/app/config/access.toml:ro
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/fundamentals-agent.key:/run/keys/private/fundamentals-agent.key:ro
+    ports:
+      - "127.0.0.1:8402:8000"
+    depends_on: *agent-deps
+    healthcheck: *tcp-health
+
+  # ---- Slice 3: debate and grounding --------------------------------------
+
+  news-agent: # A2A specialist reading untrusted text; one read-only tool
+    build: { context: ., args: { PACKAGE: news-agent } }
+    command: ["news-agent"]
+    environment:
+      <<: *agent-env
+      PUBLIC_URL: http://news-agent:8000/
+      SERVICE_NAME: news-agent
+    volumes:
+      - ./config/access.toml:/app/config/access.toml:ro
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/news-agent.key:/run/keys/private/news-agent.key:ro
+    ports:
+      - "127.0.0.1:8403:8000"
+    depends_on: *agent-deps
+    healthcheck: *tcp-health
+
+  memory: # MCP server: long-term memory, pgvector + local embeddings
+    build: { context: ., args: { PACKAGE: memory-mcp } }
+    command: ["memory-mcp"]
+    environment:
+      DATABASE_URL: postgresql://memory:${MEMORY_DB_PASSWORD}@postgres:5432/psx
+      MCP_ALLOWED_HOSTS: memory:8000,127.0.0.1:*,localhost:*
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      SERVICE_NAME: memory
+      AUTH_REQUIRED: "1"
+      KEYS_DIR: /run/keys
+    volumes:
+      - ./config/access.toml:/app/config/access.toml:ro
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/memory.key:/run/keys/private/memory.key:ro
+    ports:
+      - "127.0.0.1:8500:8000"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      <<: *tcp-health
+      start_period: 30s # loading the embedding model
+
+  debate-agent: # A2A: bull_case, bear_case, judgement
+    build: { context: ., args: { PACKAGE: debate-agent } }
+    command: ["debate-agent"]
+    environment:
+      <<: *agent-env
+      PUBLIC_URL: http://debate-agent:8000/
+      MEMORY_MCP_URL: http://memory:8000/mcp
+      SERVICE_NAME: debate-agent
+    volumes:
+      - ./config/access.toml:/app/config/access.toml:ro
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/debate-agent.key:/run/keys/private/debate-agent.key:ro
+    ports:
+      - "127.0.0.1:8404:8000"
+    depends_on:
+      llm-gateway: { condition: service_healthy }
+      market-data: { condition: service_healthy }
+      memory: { condition: service_healthy }
+    healthcheck: *tcp-health
+
+  orchestrator:
+    build: { context: ., args: { PACKAGE: orchestrator } }
+    command: ["orchestrator"]
+    environment:
+      AGENT_URLS: http://technical-agent:8000,http://fundamentals-agent:8000,http://news-agent:8000,http://debate-agent:8000,http://portfolio-agent:8000
+      MARKET_DATA_MCP_URL: http://market-data:8000/mcp
+      MEMORY_MCP_URL: http://memory:8000/mcp
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      DATABASE_URL: postgresql://orchestrator:${ORCHESTRATOR_DB_PASSWORD}@postgres:5432/psx
+      REDIS_URL: redis://redis:6379/0
+      LEASE_SECONDS: "30"
+      ENGINE_CONCURRENCY: "1" # measured: 2 is slower under 8K TPM; see docs/token-budget.md
+      SERVICE_NAME: orchestrator
+      AUTH_REQUIRED: "1"
+      KEYS_DIR: /run/keys
+    volumes:
+      - ./config/access.toml:/app/config/access.toml:ro
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/orchestrator.key:/run/keys/private/orchestrator.key:ro
+    ports:
+      - "127.0.0.1:8200:8000"
+    restart: unless-stopped # a crashed worker comes back and resumes from checkpoints
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      technical-agent: { condition: service_healthy }
+      fundamentals-agent: { condition: service_healthy }
+      news-agent: { condition: service_healthy }
+      debate-agent: { condition: service_healthy }
+      portfolio-agent: { condition: service_healthy }
+    healthcheck: *tcp-health
+
+  # ---- Slice 2: events --------------------------------------------------
+
+  scheduler:
+    build: { context: ., args: { PACKAGE: scheduler } }
+    command: ["scheduler"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      WATCHLIST: LUCK,ENGRO,HBL,OGDC,PPL,MCB,FFC,SYS,HUBC,MEBL
+      SCHEDULE_AT: "16:15" # Pakistan time; PSX closes at 15:30
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+    restart: unless-stopped
+    depends_on:
+      redis: { condition: service_healthy }
+
+  # ---- Slice 4: action and governance ------------------------------------
+
+  broker: # MCP server: the paper broker. The only writer of trading state.
+    build: { context: ., args: { PACKAGE: broker-mcp } }
+    command: ["broker-mcp"]
+    environment:
+      DATABASE_URL: postgresql://broker:${BROKER_DB_PASSWORD}@postgres:5432/psx
+      MARKET_DATA_MCP_URL: http://market-data:8000/mcp
+      MCP_ALLOWED_HOSTS: broker:8000,127.0.0.1:*,localhost:*
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      SERVICE_NAME: broker
+      AUTH_REQUIRED: "1"
+      KEYS_DIR: /run/keys
+    volumes:
+      - ./config/access.toml:/app/config/access.toml:ro
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/broker.key:/run/keys/private/broker.key:ro
+    ports:
+      - "127.0.0.1:8600:8000"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      market-data: { condition: service_healthy }
+    healthcheck: *tcp-health
+
+  portfolio-agent: # A2A: brief -> paper-trade proposal. Can propose, never approve.
+    build: { context: ., args: { PACKAGE: portfolio-agent } }
+    command: ["portfolio-agent"]
+    environment:
+      <<: *agent-env
+      PUBLIC_URL: http://portfolio-agent:8000/
+      BROKER_MCP_URL: http://broker:8000/mcp
+      SERVICE_NAME: portfolio-agent
+    volumes:
+      - ./config/access.toml:/app/config/access.toml:ro
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/portfolio-agent.key:/run/keys/private/portfolio-agent.key:ro
+    ports:
+      - "127.0.0.1:8405:8000"
+    depends_on:
+      llm-gateway: { condition: service_healthy }
+      market-data: { condition: service_healthy }
+      broker: { condition: service_healthy }
+    healthcheck: *tcp-health
+
+  official-web: # MCP server: web search + page reading, official sources only (enforced here)
+    build: { context: ., args: { PACKAGE: official-web-mcp } }
+    command: ["official-web-mcp"]
+    environment:
+      MCP_ALLOWED_HOSTS: official-web:8000,127.0.0.1:*,localhost:*
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      SERVICE_NAME: official-web
+      AUTH_REQUIRED: "1"
+      KEYS_DIR: /run/keys
+    volumes:
+      - ./config/access.toml:/app/config/access.toml:ro
+      - ./config/official_sources.toml:/app/config/official_sources.toml:ro
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/official-web.key:/run/keys/private/official-web.key:ro
+    ports:
+      - "127.0.0.1:8800:8000"
+    healthcheck: *tcp-health
+
+  advisor-agent: # A2A: the chat advisor. Reads everything, can suggest a trade, never approve one.
+    build: { context: ., args: { PACKAGE: advisor-agent } }
+    command: ["advisor-agent"]
+    environment:
+      <<: *agent-env
+      PUBLIC_URL: http://advisor-agent:8000/
+      ORCHESTRATOR_URL: http://orchestrator:8000
+      BROKER_MCP_URL: http://broker:8000/mcp
+      MEMORY_MCP_URL: http://memory:8000/mcp
+      OFFICIAL_WEB_MCP_URL: http://official-web:8000/mcp
+      WATCHLIST: &watchlist LUCK,ENGRO,HBL,OGDC,PPL,MCB,FFC,SYS,HUBC,MEBL
+      SERVICE_NAME: advisor-agent
+    volumes:
+      - ./config/access.toml:/app/config/access.toml:ro
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/advisor-agent.key:/run/keys/private/advisor-agent.key:ro
+    ports:
+      - "127.0.0.1:8406:8000"
+    depends_on:
+      llm-gateway: { condition: service_healthy }
+      broker: { condition: service_healthy }
+      orchestrator: { condition: service_healthy }
+      official-web: { condition: service_healthy }
+    healthcheck: *tcp-health
+
+  dashboard: # the app's API: sessions, live event stream. Only holder of broker:decide.
+    build: { context: ., args: { PACKAGE: dashboard } }
+    command: ["dashboard"]
+    environment:
+      BROKER_MCP_URL: http://broker:8000/mcp
+      MARKET_DATA_MCP_URL: http://market-data:8000/mcp
+      ORCHESTRATOR_URL: http://orchestrator:8000
+      LLM_GATEWAY_URL: http://llm-gateway:8000
+      ADVISOR_URL: http://advisor-agent:8000
+      REDIS_URL: redis://redis:6379/0
+      WATCHLIST: *watchlist
+      DASHBOARD_USER: ${DASHBOARD_USER:-operator}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?set DASHBOARD_PASSWORD in .env}
+      DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:?set DASHBOARD_SESSION_SECRET in .env}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      SERVICE_NAME: dashboard
+      AUTH_REQUIRED: "1"
+      KEYS_DIR: /run/keys
+    volumes:
+      - ./config/access.toml:/app/config/access.toml:ro
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/dashboard.key:/run/keys/private/dashboard.key:ro
+    ports:
+      - "127.0.0.1:8701:8000" # for `npm run dev` in web/; the browser uses 8700
+    depends_on:
+      broker: { condition: service_healthy }
+      orchestrator: { condition: service_healthy }
+      market-data: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck: *tcp-health
+
+  web: # the app you open: Next.js + shadcn/ui. http://127.0.0.1:8700
+    build: { context: ./web, args: { API_URL: http://dashboard:8000 } }
+    ports:
+      - "127.0.0.1:8700:3000"
+    depends_on:
+      dashboard: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  mdsnapshots:

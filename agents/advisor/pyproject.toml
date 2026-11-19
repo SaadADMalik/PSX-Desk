@@ -1,0 +1,17 @@
+[project]
+name = "advisor-agent"
+version = "0.1.0"
+description = "A2A agent: conversational research advisor"
+requires-python = ">=3.13"
+dependencies = ["agentkit", "contracts", "langgraph>=1.0"]
+
+[project.scripts]
+advisor-agent = "advisor_agent.main:run"
+
+[tool.uv.sources]
+agentkit = { workspace = true }
+contracts = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"
