@@ -1,378 +1,348 @@
-# PSX Agent Desk
+# PSX Desk
 
-A multi-agent research desk and demo trading account for the Pakistan Stock
-Exchange, built from protocols up to learn how enterprise multi-agent systems work.
-It runs entirely on free tiers (Groq, local Docker).
+[![ci](https://github.com/SaadADMalik/PSX-Desk/actions/workflows/ci.yml/badge.svg)](https://github.com/SaadADMalik/PSX-Desk/actions/workflows/ci.yml)
+[![e2e](https://github.com/SaadADMalik/PSX-Desk/actions/workflows/e2e.yml/badge.svg)](https://github.com/SaadADMalik/PSX-Desk/actions/workflows/e2e.yml)
+[![security](https://github.com/SaadADMalik/PSX-Desk/actions/workflows/security.yml/badge.svg)](https://github.com/SaadADMalik/PSX-Desk/actions/workflows/security.yml)
+
+**An AI research desk and demo trading account for the Pakistan Stock Exchange.**
+
+A team of AI agents researches PSX stocks every trading day, argues the case for and
+against each one, and proposes sized trades that you approve. An advisor chat answers
+questions about stocks, companies and your account, using only official sources, and
+writes its answer as you watch.
 
 **Demo money, real prices.** Trades go into a demo account that starts with
-Rs 1,000,000 of test money and fills at real PSX prices with realistic fees. Nothing
-touches a real brokerage. Output is research, not licensed financial advice.
+Rs 1,000,000 and fills at live PSX prices with realistic fees. Nothing touches a real
+brokerage. Output is research, not licensed financial advice.
 
-For the full picture, read [`docs/project-overview.md`](docs/project-overview.md).
-Decisions are recorded in [`docs/adr/`](docs/adr/).
+---
 
-## Status
+## What it does
 
-| Slice | What | State |
+| | |
+|---|---|
+| **Covers the whole market** | All ~750 traded PSX securities, with live prices, day and 1-year change, P/E, dividend yield and traded value. Search any stock by ticker or company name from anywhere (`Ctrl+K`). |
+| **Researches your watchlist daily** | After the market closes, specialist agents analyse each watchlist stock from three angles: price trend, valuation and company announcements. A bull and a bear argue the case, and a head-of-research agent writes the brief. Any stock can be researched on demand. |
+| **Shows its reasoning** | Every brief shows the stance and confidence, key points and risks, both sides of the debate, what each analyst found, and how the desk reached its decision. Every number in it has been checked against the data. |
+| **Proposes, never acts** | When the desk feels strongly, it proposes a sized demo trade. Nothing executes until you approve it. At approval the broker re-prices the trade and re-checks every limit. |
+| **Advises from official sources** | The advisor reads your account, the desk's research, live prices and announcements, and searches the web **only** on official sites: PSX, Pakistani regulators (SBP, SECP and others) and the companies' own domains. It cites what it read. |
+| **Keeps a tamper-evident record** | Every proposal, approval and fill goes into a hash-chained audit log that the app verifies continuously. |
+
+### The app
+
+| Screen | What it is for |
+|---|---|
+| **Today** | Account value, today's move, cash, trades awaiting approval, and your watchlist with live prices, 30-day sparklines and the desk's latest call |
+| **Stocks** | The whole market: search on every keystroke, sector filter, sortable columns, gainers, losers and most active |
+| **Stock page** | Price chart, the desk's view and how it was decided, the case for and against, each analyst's findings, your position, and Research and Trade buttons |
+| **Advisor** | Chat that streams its answer, showing each step live (*Searched official sources…*, *Read meezanbank.com*, *Checked live prices*) |
+| **Demo account** | Value over time against the same money in the KSE-100, holdings, every fill with fees, every proposal and its outcome |
+| **Under the hood** | Every agent and its status, today's AI budget per model, and the audit chain's verification |
+
+Prices update in place over server-sent events. When research finishes or a trade
+fills, open screens refresh themselves.
+
+---
+
+## Why you can trust what it says
+
+LLMs write fluently and are sometimes confidently wrong. The desk is built so the
+model chooses the words, and code owns the facts and the decisions.
+
+- **Every number is checked.** A claim verifier compares each figure in a brief with
+  the evidence it cites, and drops any figure it can't find there. In a live run it
+  caught a model writing "10.0% above the 50-day average" when the data said 3.3%.
+- **Evidence can't be altered.** Facts are stored by the service that computed them
+  and passed between agents by ID. The verifier fetches the originals, so no agent can
+  change a number on its way to the check.
+- **Decision rules live in code.** A starting stance is computed from the analysts'
+  views and the strength of each side's case. The judge may depart from it only with
+  an evidence-backed reason, which the stock page shows. Case strength is computed
+  from weighted arguments and counter-points, not from a number the model makes up.
+- **Trade sizes are arithmetic.** The model picks the intention (buy, how strongly).
+  Code calculates the shares from cash, price and limits.
+- **The broker trusts nobody's numbers.** It fetches its own price and refuses stale
+  data. It checks position limits when a trade is proposed and again when it fills,
+  and refuses a fill if the price has moved more than 3%.
+- **Official sources only, by construction.** The web-search service drops any result
+  or redirect outside the allow-list before fetching it. The rule holds whatever the
+  model asks for.
+
+---
+
+## Architecture
+
+```
+                                 ┌───────────────── web app (Next.js) ─────────────────┐
+                                 │  live prices · search · approvals · advisor chat    │
+                                 └──────────────────────────┬──────────────────────────┘
+                                                            │ session + CSRF guard
+                                                 ┌──────────▼──────────┐
+       scheduler ── Redis Streams ──►            │      app API        │  only holder of
+       (after close)                             │     (dashboard)     │  broker:decide
+                                                 └──┬───────────────┬──┘
+                                            A2A     │               │  A2A (streaming)
+                                 ┌──────────────────▼──┐        ┌───▼─────────────┐
+                                 │    orchestrator     │        │  advisor agent  │
+                                 │ durable workflows,  │        │ tools + official│
+                                 │ verifier, risk gate │        │ web search      │
+                                 └──┬──────────────────┘        └───┬─────────────┘
+                     A2A (parallel) │                               │ MCP
+     ┌──────────────┬───────────────┼──────────────┬────────────┐  │
+     ▼              ▼               ▼              ▼            ▼  ▼
+ technical    fundamentals        news          debate       portfolio      MCP servers:
+  agent          agent           agent      bull·bear·judge    agent        market-data · broker
+     └──────────────┴───────────────┴──────────────┴────────────┘          memory (pgvector)
+                    every model call ──► LLM gateway ──► LLM provider       official-web
+```
+
+**Services:** 6 agent services carrying 8 agent roles (technical, fundamentals and news
+analysts; bull, bear and judge; portfolio; advisor), the orchestrator, a scheduler, an LLM gateway, 4 MCP servers,
+the app API and the web app, plus Postgres with pgvector, Redis and Jaeger, all in
+Docker Compose. Every service runs as its own container with its own identity.
+
+### Multi-agent communication
+
+| Layer | Protocol | Used for |
 |---|---|---|
-| 0 | Infrastructure, LLM gateway, PSX adapter, single-agent brief | **done** |
-| 1 | MCP server, A2A agents, orchestrator, one trace across all | **done** |
-| 2 | Event bus, durable workflows, idempotency, dead-letter queue | **done** |
-| 3 | Debate agents, evidence verifier, risk gate, memory | **done** |
-| 4 | Paper broker, approvals, per-service DB roles, signed tokens, audit log | **done** |
-| + | Web app (Next.js + shadcn/ui), live updates, advisor chat with official-source search and streaming replies | **done** |
+| Agent ↔ agent | **A2A** | Delegating a task to an agent that thinks for itself: analysis, debate, judgement, trade proposals, advisor chat |
+| Agent ↔ tool | **MCP** | Data and actions with typed inputs and outputs: prices, valuations, announcements, evidence, portfolio, orders, memory, official-web search |
+| Service ↔ service events | **Redis Streams** | Research requests and "brief ready" events, with consumer groups, reclaim and a dead-letter stream |
+| App → browser | **SSE** | Live prices, refresh signals, and the advisor's tool steps and text as they happen |
+
+- **Discovery by skill.** Each agent publishes an A2A agent card listing its skills.
+  The orchestrator looks agents up by skill (`technical_analysis`, `bull_case`,
+  `judgement`, …) instead of by address, and records any agent it can't reach.
+- **Tasks, not calls.** A2A tasks move through states (submitted, working,
+  completed, failed) and can stream progress. The advisor's steps reach the browser as
+  A2A status updates, relayed over SSE.
+- **Parallel and blind.** The three analysts run at the same time. The bull and bear
+  argue independently, on different model families, so they don't share one model's
+  blind spots or its rate limits.
+- **Partial failure is normal.** A missing analysis or a missing case lowers the
+  brief's confidence ceiling and is reported, without failing the run. If every
+  analyst fails, the run is parked and retried.
+- **The orchestrator never calls a model.** It coordinates and checks; agents think.
+
+### How a research brief is produced
+
+```
+request (scheduler, app or CLI) ─► orchestrator opens a run (lease, checkpoints, outbox)
+  1. technical · fundamentals · news, in parallel (A2A) ── each calls MCP tools;
+     every fact is stored in the evidence table, by ID
+     └─ verify: every number in every point must exist in its cited evidence
+  2. bull case · bear case, in parallel and blind (A2A)  └─ verify the arguments
+  3. judge: desk lean (code) + both cases + prior views from memory (pgvector)
+     └─ verify the brief; a rejected brief goes back to the judge once with the reasons
+  4. risk gate (code): veto if illiquid; cap confidence for volatility, drawdown, fresh
+     announcements, stale data, missing analyses or a one-sided debate
+  5. remember the brief (memory)
+  6. if actionable: portfolio agent ─► intent (model) ─► shares (code) ─► PENDING proposal
+  ─► result + brief.completed, written in one transaction (outbox) ─► Redis Streams
+
+you approve in the app ─► broker re-prices, re-checks limits ─► fill + audit entry
+```
+
+### How an advisor reply is produced
+
+```
+browser ─POST /api/chat/stream─► app API ─A2A streaming─► advisor agent (agent loop)
+   ▲                                                          │
+   └──── SSE: tool steps, then the answer as it is written ───┤
+                                                              ▼
+  desk_view, research .......... orchestrator        LLM gateway ─stream─► LLM
+  market_snapshot, quotes, news  market-data         retries and fallback happen
+  my_portfolio, suggest_trade .. broker              only before the first word
+  past_views ................... memory
+  search_official, read_official  official-web  ◄── allow-list enforced in code
+```
+
+The advisor can *suggest* a demo trade, and it lands in your approval queue. It can
+never approve or execute anything.
+
+---
+
+## Reliability
+
+- **One gateway for every model call.** It enforces per-model limits (requests and
+  tokens, per minute and per day, including output tokens per minute), retries,
+  falls back to another model, and runs a circuit breaker and a response cache.
+  Interactive chat gets priority over background research. Any single call is capped
+  at 7,000 tokens, and agent loops trim older tool results to stay under it.
+- **Crash-safe workflows.** Each research run is leased, every step is checkpointed,
+  and the result and its event are committed together (outbox). A crashed worker's
+  run resumes from its last checkpoint. A run that keeps failing stops after a fixed
+  number of attempts and announces `brief.failed`.
+- **Idempotent everywhere.** Requests carry idempotency keys, and scheduled research
+  is keyed by date and symbol. Consumers deduplicate events. Firing twice produces one run.
+- **Graceful data fallback.** If PSX is unreachable, research runs on the last good
+  snapshot and says so in the brief. The broker never fills at a stale price.
+- **Fast reads.** The whole market loads in one request and is cached briefly, so
+  search runs in the browser on every keystroke. Holdings are priced in one batched
+  request, so account pages respond in about 0.1 s.
+
+## Security
+
+- **Service identity.** Every call between services carries an Ed25519-signed JWT that
+  lives 60 seconds and is valid only for the receiving service.
+- **Permissions decided by the receiver.** One policy file,
+  [`config/access.toml`](config/access.toml), states who may call what. A caller can't
+  grant itself a scope, and a caller that isn't listed is refused even with a valid token.
+- **Separation of duties.** The portfolio agent can propose but not approve. Only the
+  app's API, acting for a signed-in human, holds `broker:decide`. Proposer and approver
+  are recorded as different identities.
+- **Prompt injection has nowhere to go.** The news agent reads untrusted company text,
+  but it can't read prices or reach the broker. The worst a hijacked agent can do is
+  add a pending proposal for a human to reject.
+- **Tamper-evident audit.** Each audit entry carries a hash of the one before. The
+  database refuses UPDATE, DELETE and TRUNCATE on the log, and the app verifies the
+  chain continuously.
+- **Least-privilege data access.** Each service has its own Postgres role and can
+  append to the tables it owns but not rewrite history.
+- **Hardened web surface.** Signed, HTTP-only, SameSite=strict session cookies; a CSRF
+  header on every write; the LLM key held by the gateway alone.
+- **13 security drills** ([`scripts/security_drills.py`](scripts/security_drills.py))
+  run against the live stack in CI and check that each forbidden call really is refused.
+
+## Observability
+
+- **One trace per request** (OpenTelemetry → Jaeger), across the app, orchestrator,
+  agents, MCP servers and gateway, including across the event bus.
+- **Every model call recorded** in Postgres: caller, model, outcome, tokens, latency,
+  cache hits and errors. This feeds the live per-model budget on *Under the hood*.
+- **Durable state you can query:** workflow runs and steps, the outbox, the
+  dedupe inbox, the evidence store, memories, and the trading and audit tables.
+
+## Quality
+
+Every pull request runs:
+
+| Workflow | Checks |
+|---|---|
+| **ci** | ruff, then 225 Python tests (unit, plus Postgres integration via testcontainers); web eslint, type check and production build |
+| **e2e** | Playwright against the built app with recorded API responses (sign-in, search, filters, stock page, advisor streaming, demo account); then the **full stack in Docker** with throwaway secrets, running the security drills and browser smoke tests against the real system |
+| **security** | CodeQL (Python, TypeScript), gitleaks secret scan, dependency review; Dependabot opens grouped update PRs weekly |
+
+---
 
 ## Run it
 
-Needs Docker, [uv](https://docs.astral.sh/uv/), Node 22 (only to develop the web
-app outside Docker), and a free Groq API key.
+Requires Docker, [uv](https://docs.astral.sh/uv/), and an API key for an
+OpenAI-compatible LLM provider. Node 22 is needed only to work on the web app outside Docker.
 
 ```bash
-cp .env.example .env    # then set GROQ_API_KEY, the passwords and the dashboard secret
+cp .env.example .env         # set the LLM API key, the passwords and the session secret
 uv sync
-uv run desk-keygen           # one Ed25519 key pair per service, into .keys/ (untracked)
+uv run desk-keygen           # one Ed25519 key pair per service, into .keys/ (git-ignored)
 docker compose up -d --build
 ```
 
-Then open **http://127.0.0.1:8700** and sign in as `operator` (or `DASHBOARD_USER`)
-with `DASHBOARD_PASSWORD` from `.env`.
+Open **http://127.0.0.1:8700** and sign in as `operator` (or `DASHBOARD_USER`) with
+`DASHBOARD_PASSWORD` from `.env`.
 
 From the terminal:
 
 ```bash
-uv run desk-brief LUCK       # multi-agent: specialists -> bull/bear -> judge -> checks
-uv run baseline-brief LUCK   # the same question answered by one agent with every tool
+uv run desk-brief LUCK       # full multi-agent brief, with the verifier's report
+uv run baseline-brief LUCK   # the same question answered by a single agent with every tool
 ```
 
-If `GROQ_API_KEY` is already set in your shell environment, Compose uses that
-value when the line in `.env` is empty. To work on the web app with hot reload:
-`cd web && npm install && npm run dev` (it talks to the API on 127.0.0.1:8701).
+Web app with hot reload: `cd web && npm install && npm run dev` (it uses the API on 127.0.0.1:8701).
 
-## The app
-
-| Page | What it is for |
-|---|---|
-| **Today** | Demo account value, today's move, cash, and suggested trades waiting for your approval. Your watchlist with live prices, 30-day sparklines and the desk's latest call, with Research and Trade buttons on each row |
-| **Advisor** | A chat that acts as your research advisor. It reads your account, the desk's research, live prices and announcements, and searches the web **only on official sources** (PSX, regulators, the company's own site). Replies stream as they are written, with each step shown live |
-| **Demo account** | Account value over time against the same money put into the KSE-100, holdings, every trade with its fees, and every suggestion with its outcome |
-| **Stocks** | Any PSX ticker: price chart (1M to 1Y), the desk's view, the case for and against, what each analyst found, your position, a Trade button |
-| **Under the hood** | The agents and their versions, today's free AI budget per model, and the tamper-evident audit record |
-
-Prices tick in place (server-sent events). When a brief finishes or a trade fills,
-open screens refresh themselves and a toast says what happened.
-
-**Who can do what.** The desk and the advisor can *suggest* a demo trade. Only you,
-signed in to the app, can approve one; you can also trade directly. The advisor can
-never approve or execute anything.
-
-## How a multi-agent brief flows
-
-```
-scheduler / desk-brief --> orchestrator: run in Postgres (lease, checkpoints, outbox)
-   |
-   |  1. specialists, in parallel (A2A)                     MCP tools they may call
-   |     technical-agent    (gpt-oss-20b) --------------->  get_price_summary
-   |     fundamentals-agent (gpt-oss-20b) --------------->  get_valuation
-   |     news-agent         (Qwen)        --------------->  get_announcements   (untrusted text)
-   |        every result is stored in the evidence table by market-data, by id
-   |
-   |  verify: every number in every point must be in the evidence it cites (code)
-   |
-   |  2. debate, in parallel and blind to each other (A2A, debate-agent)
-   |     bull_case (Qwen)            bear_case (gpt-oss-20b)
-   |  verify the arguments (code)
-   |
-   |  3. judgement (gpt-oss-120b) + prior views recalled from memory (MCP, pgvector)
-   |  verify the brief (code); if unusable, send the rejections back to the judge
-   |
-   |  4. risk gate (code): veto if illiquid; cap confidence on volatility, drawdown,
-   |     fresh announcements, stale data, missing analyses, a one-sided debate
-   |  5. remember the brief (memory MCP), best effort
-   |  6. if actionable: portfolio-agent (A2A) -> intent (model) -> shares (code)
-   |     -> broker.propose_order (MCP)  =>  a PENDING paper trade
-   v
-result + brief.completed (outbox) --> desk.briefs
-
-you --> web app (127.0.0.1:8700) --> app API --broker.decide--> re-price, re-check limits
-                                                              --> paper fill + audit row
-```
-
-Every arrow above carries a signed token (Ed25519 JWT, 60 s, one audience), and
-every receiver checks it against [`config/access.toml`](config/access.toml). The
-portfolio agent can propose but never approve; only the app's API, driven by a
-signed-in human, holds `broker:decide`.
-
-## How an advisor reply flows
-
-```
-browser --POST /api/chat/stream--> app API --A2A SendStreamingMessage--> advisor-agent
-   ^                                                                       |
-   |   server-sent events: tool steps, then the answer as it is written    |  agent loop
-   +-----------------------------------------------------------------------+  (streams)
-                                                                           |
-      tools, each a scoped MCP or HTTP call:                               v
-        desk_view, research ........ orchestrator      LLM gateway --stream--> Groq
-        market_snapshot, news, quotes  market-data     (retries and fallback happen
-        my_portfolio, suggest_trade .. broker           only before the first word)
-        past_views ................... memory
-        search_official, read_official  official-web  <- allow-list enforced in code
-```
-
-- **Official sources only, by construction.** The official-web MCP server drops any
-  search result or redirect outside [`config/official_sources.toml`](config/official_sources.toml)
-  before it is fetched. Besides a free metasearch library, it finds pages through
-  each site's own sitemap, so it still works when search engines throttle it, and it
-  reads PDFs with their table rows intact.
-- **Streaming is end to end.** Groq streams to the gateway, the gateway to the agent
-  loop, the advisor reports progress as A2A status updates, and the app relays them
-  to the browser, which types the text out smoothly.
-- See ADRs [0011](docs/adr/0011-service-identity-and-authorisation.md) (identity) and
-  [0012](docs/adr/0012-paper-broker-approvals-audit.md) (broker, approvals, audit).
-
-- The orchestrator makes no model calls. It coordinates and checks; agents think.
-- Evidence travels by id. The verifier fetches the facts from the service that
-  computed them, so no agent can alter a number on its way to the check.
-- Bull, bear and judge prefer different model families, so they do not share one
-  model's blind spots or one model's token budget.
-- Partial failure is normal: a missing analysis or a missing case lowers the
-  confidence ceiling; if every specialist fails, the run is parked.
-- See ADRs [0009](docs/adr/0009-debate-verifier-risk-gate.md) (debate, verifier,
-  risk gate) and [0010](docs/adr/0010-evidence-store-and-memory.md) (evidence store, memory).
-
-## What to look at
-
-| Where | What it shows |
-|---|---|
-| Terminal output | The brief, the risk verdict, both debate cases, each claim with its evidence ids, and what the verifier rejected |
-| `runs/*.json` | Full run: brief, risk flags, verification at every hand-off, reports, cases, prior views, models used, evidence, tokens |
-| http://127.0.0.1:16686 (Jaeger) | One trace per brief across orchestrator, both agents, the MCP server and the gateway |
-| http://127.0.0.1:8200/v1/agents | What the orchestrator discovered: skill, agent, version, URL |
-| http://127.0.0.1:8401/.well-known/agent-card.json | The technical agent's A2A card (8402 fundamentals, 8403 news, 8404 debate: three skills on one card) |
-| http://127.0.0.1:8300/mcp | The MCP server; point the MCP Inspector at it (`npx @modelcontextprotocol/inspector`) |
-| http://127.0.0.1:8100/v1/budget | Requests and tokens used today per model, circuit state |
-| `llm_calls` table | Every model call: caller, model, outcome, tokens, latency, cache hits, errors |
-| http://127.0.0.1:8200/v1/runs | Recent workflow runs; `/v1/runs/{id}` shows each step and attempt |
-| `docker compose exec orchestrator desk-events` | Latest events on every stream and its dead-letter stream |
-| `workflow_runs`, `workflow_steps`, `outbox`, `processed_events` | Durable state, checkpoints, unpublished events, the dedupe inbox |
-| `evidence`, `memories` tables | Every computed fact by id; every remembered brief with its embedding |
-| http://127.0.0.1:8500/mcp | The memory MCP server (`recall`, `remember`) |
-| http://127.0.0.1:8700 | The app (see above). User `operator` (or `DASHBOARD_USER`), password `DASHBOARD_PASSWORD` from `.env` |
-| http://127.0.0.1:8701/api/... | The app's JSON API and live event stream (`/api/events`), behind the same sign-in |
-| http://127.0.0.1:8406/.well-known/agent-card.json | The advisor's A2A card: `capabilities.streaming` is true |
-| http://127.0.0.1:8800/mcp | The official-web MCP server (`search_official`, `read_official`) |
-| [`config/official_sources.toml`](config/official_sources.toml) | The only domains the advisor may search or read; add a company's site when you add it to the watchlist |
-| [`config/access.toml`](config/access.toml) | Who may call what, for every service, in one file |
-| `proposals`, `fills`, `cash_ledger`, `audit_log` tables | Paper trading state (written only by the `broker` role) and the tamper-evident audit trail |
+Tests:
 
 ```bash
-docker compose exec postgres psql -U psx_admin -d psx -c "select caller, model, outcome, prompt_tokens, completion_tokens, latency_ms from llm_calls order by id desc limit 20"
+uv run pytest && uv run ruff check .
+cd web && npm run lint && npm run typecheck && npm run build && npx playwright test
 ```
+
+### Configuration
+
+| File | Controls |
+|---|---|
+| `.env` | LLM API key, database passwords, app password and session secret (never committed) |
+| [`config/access.toml`](config/access.toml) | Who may call what, for every service |
+| [`config/official_sources.toml`](config/official_sources.toml) | The only domains the advisor may search or read (regulators, plus each company's site) |
+| `WATCHLIST` in `docker-compose.yml` | The stocks researched automatically each trading day |
+
+---
+
+## Operating it
+
+| Where | What you see |
+|---|---|
+| http://127.0.0.1:8700 | The app |
+| http://127.0.0.1:16686 | Jaeger: one trace per brief or chat, across every service |
+| http://127.0.0.1:8200/v1/agents | What the orchestrator discovered: skill, agent, version, URL |
+| http://127.0.0.1:8200/v1/runs | Recent workflow runs; `/v1/runs/{id}` shows each step and attempt |
+| http://127.0.0.1:8100/v1/budget | Requests and tokens used today per model, circuit state |
+| `http://127.0.0.1:84xx/.well-known/agent-card.json` | Each agent's A2A card (8401 technical, 8402 fundamentals, 8403 news, 8404 debate, 8405 portfolio, 8406 advisor) |
+| http://127.0.0.1:8300/mcp | Market-data MCP server; inspect with `npx @modelcontextprotocol/inspector` (also 8500 memory, 8600 broker, 8800 official-web) |
+| `docker compose exec orchestrator desk-events` | Latest events on every stream and its dead-letter stream |
+| `llm_calls` table | Every model call with tokens, latency, outcome |
+
+```bash
+docker compose exec postgres psql -U psx_admin -d psx -c \
+  "select caller, model, outcome, prompt_tokens, completion_tokens, latency_ms from llm_calls order by id desc limit 20"
+```
+
+Ports are all bound to 127.0.0.1: 8700 app, 8701 app API, 8100 gateway, 8200
+orchestrator, 8300 market-data, 8401–8406 agents, 8500 memory, 8600 broker,
+8800 official-web, 16686 Jaeger.
+
+### Failure drills
+
+| Drill | Command | Expected |
+|---|---|---|
+| Agent down | `docker compose stop fundamentals-agent`, then `uv run desk-brief ENGRO` | Brief is written, lists the missing analysis, confidence capped |
+| Crash mid-run | `docker compose exec redis redis-cli SET drill:crash_after_step technical_analysis`, then a brief | Orchestrator exits after the checkpoint, restarts, resumes without redoing the step |
+| Scheduler fires twice | `docker compose exec scheduler desk-schedule --symbols LUCK,ENGRO` twice | Two runs, not four |
+| Poison event | `docker compose exec redis redis-cli XADD desk.requests '*' event 'not json'` | Lands in `desk.requests.dlq` with the reason |
+| Client retry | POST `/v1/briefs` twice with one `Idempotency-Key` | Same `run_id`, marked duplicate |
+| Limiter down | `docker compose stop redis` | Gateway fails closed; no unmetered model calls |
+| Least privilege | Delete from `llm_calls` as the `gateway` role | `permission denied` |
+| Security | `uv run python scripts/security_drills.py` | 13 of 13 refused as expected |
+
+---
+
+## Engineering decisions
+
+Each decision has a full record in [`docs/adr/`](docs/adr/); the system is described
+end to end in [`docs/project-overview.md`](docs/project-overview.md).
+
+- **A hand-written agent loop and workflow engine.** Every step, retry and trim is
+  visible, testable and traceable. Guardrails live in the services they protect, not in
+  the orchestration layer, so the orchestration could be replaced without weakening them.
+- **Rules in code, not prompts.** "Official sources only" holds because the server
+  drops everything else. "Don't exceed limits" holds because the broker refuses.
+- **Classify provider errors before retrying.** A rate limit means wait. "Request too
+  large" will never succeed on that model, and a malformed tool call needs one
+  correction, not a retry. Each has its own error class.
+- **Streaming changes where retries can happen.** Before the first word, the gateway
+  may retry or switch models. After it, a retry would repeat text, so a broken stream
+  is reported as an error.
+- **Stable inputs make caching work.** Volatile fields (fetch times) are kept out of
+  model prompts, so repeated research costs no tokens.
+- **Real market data has quirks.** PSX renames symbols during ex-dividend periods
+  (`HUBCXD`) and lists non-voting, rights and non-compliant securities under suffixes.
+  The data layer maps them back to the company.
+- **Narrow agents beat one big agent.** Specialists with one tool and a tight prompt
+  invent less than a single agent holding every tool (kept as `baseline-brief` for
+  comparison), and they fail independently.
 
 ## Layout
 
 ```
-libs/contracts          typed, versioned messages (chat, evidence, analysis, debate, review, events)
-libs/agentkit           agent loop, gateway client, structured output, tracing,
-                        MCP toolset (mcp_tools.py), A2A server + directory (a2a.py),
-                        shared specialist routine (analyst.py)
-libs/marketdata         PSX source, last-good snapshots, indicators and news summaries in code
-libs/eventbus           Redis Streams publish/consume, reclaim, dead-letter; desk-events CLI
-mcp_servers/market_data MCP server: read-only tools, the evidence store (evidence_store.py)
-mcp_servers/memory      MCP server: recall/remember over pgvector, local embeddings
-mcp_servers/broker      MCP server: the paper broker (proposals, decisions, fills, audit)
-agents/technical        A2A specialist: price history only
-agents/fundamentals     A2A specialist: valuation only
-agents/news             A2A specialist: announcements (untrusted text), one read-only tool
-agents/debate           A2A service with three skills: bull_case, bear_case, judgement
-mcp_servers/official_web MCP server: web search and page/PDF reading, official sources only;
-                        sitemap discovery (discovery.py)
-agents/portfolio        A2A agent: brief -> paper-trade proposal (proposes, never approves)
-agents/advisor          A2A agent: the chat advisor; streams progress; suggests, never approves
-agents/baseline         one agent with every tool, answering the same question alone
-services/orchestrator   desk.py (A2A/MCP clients), workflow.py (the brief, as durable steps),
-                        engine.py (leases, parking), store.py, verify.py, risk.py, API, CLI
-services/scheduler      fires brief.requested for the watchlist after market close
-services/llm_gateway    the only service holding the Groq key; /v1/chat and /v1/chat/stream
-services/dashboard      the app's API: sessions, JSON endpoints, live event stream, chat relay;
-                        the only holder of broker:decide
-web                     the app: Next.js 16 + shadcn/ui (Base UI), Geist, Recharts, SWR
-config/access.toml      the permission matrix every receiver enforces
-config/official_sources.toml  the domains the advisor may search and read
-libs/agentkit/auth.py   signed service tokens, verification, HTTP and MCP guards, desk-keygen
-scripts/security_drills.py    live checks that refused calls really are refused
-db/migrate.sh           applies db/migrations once each; roles and least-privilege grants
-tests                   205 tests; no network or API key needed (Postgres tests use
-                        Docker and skip without it)
-```
-
-Ports (all bound to 127.0.0.1): 8700 app, 8701 app API, 8100 gateway, 8200
-orchestrator, 8300 market-data, 8401-8406 agents, 8500 memory, 8600 broker,
-8800 official-web, 16686 Jaeger. 8080 is left alone.
-
-## Things to try (failure drills)
-
-- **Agent down:** `docker compose stop fundamentals-agent`, then `uv run desk-brief ENGRO`.
-  The brief is still written from technical analysis, lists the missing analysis in
-  `data_gaps`, and carries lower confidence. Then `docker compose start fundamentals-agent`.
-- **Cache:** run the same brief twice. The second desk run spends 0 tokens; the
-  ledger shows `cached` rows.
-- **MCP host guard:** a request to the MCP server with an unexpected `Host` header
-  gets HTTP 421 (DNS-rebinding protection).
-- **Least privilege:** the gateway's DB role cannot delete its own ledger:
-  `docker compose exec postgres sh -c 'PGPASSWORD="$GATEWAY_DB_PASSWORD" psql -h localhost -U gateway -d psx -c "delete from llm_calls"'`
-  fails with `permission denied`.
-- **Limiter down:** `docker compose stop redis`. The gateway fails closed (HTTP 500)
-  rather than calling Groq unmetered, and recovers once `docker compose start redis`
-  runs. Returning a clean 503 here is a known gap.
-- **Stale data:** if PSX is unreachable after a successful fetch, briefs still run and
-  list the stale data in `data_gaps` (covered by unit tests; not yet drilled live).
-
-Slice 2 drills (all run live; results in [ADR 0008](docs/adr/0008-events-durability-idempotency.md)):
-
-- **Scheduler fires twice:** run `docker compose exec scheduler desk-schedule --symbols LUCK,ENGRO`
-  twice. Four events arrive and two runs exist, keyed `daily:<date>:<symbol>`.
-- **Crash mid-run:** `docker compose exec redis redis-cli SET drill:crash_after_step technical_analysis`,
-  then `uv run desk-brief HBL`. The orchestrator exits right after checkpointing the
-  technical step; Docker restarts it; the run resumes on attempt 2 without redoing
-  technical analysis.
-- **Poison event:** `docker compose exec redis redis-cli XADD desk.requests '*' event 'not json'`,
-  then `docker compose exec orchestrator desk-events`. It is in `desk.requests.dlq`
-  with the reason, and nothing is left pending.
-- **Client retry:** POST `/v1/briefs` twice with the same `Idempotency-Key` header.
-  Both return the same `run_id` with `"duplicate": "idempotency_key"`.
-- **One trace across the bus:** open a scheduled run's trace in Jaeger. Its root is
-  `scheduler.fire`, and it continues through the orchestrator, both agents, MCP
-  and the gateway.
-
-Slice 3 drills (results in [ADR 0009](docs/adr/0009-debate-verifier-risk-gate.md) and
-[ADR 0010](docs/adr/0010-evidence-store-and-memory.md)):
-
-- **Read the verifier:** every brief ends with `Verifier: n/m claims verified` and lists
-  each rejected claim with the numbers it could not find. `runs/*.json` keeps the checks
-  for every hand-off (`upstream_checks`).
-- **Memory:** run `uv run desk-brief HBL` twice. The second brief shows `Prior view …`;
-  only the judge makes a model call, because the prior view changed its prompt.
-- **Specialist down:** `docker compose stop news-agent`, then a brief. It is written,
-  the risk gate says `CAUTION` with `missing_analysis`, and confidence is capped at 0.6.
-- **Memory down:** `docker compose stop memory`, then a brief. It is written; the
-  `remember` step is recorded as failed with the cause.
-- **Crash mid-debate:** `docker compose exec redis redis-cli SET drill:crash_after_step bull_case`,
-  then a brief. Attempt 2 resumes at the judge without redoing any analysis or case.
-- **Least privilege, again:** each table owner can append but not rewrite history.
-  `docker compose exec postgres psql -h localhost -U market_data -d psx -c "delete from evidence"`
-  fails with `permission denied`, as do `update evidence`, `select from llm_calls`, and
-  the memory role deleting from `memories`.
-
-Slice 4 drills (run live; 13 of 13 pass):
-
-```bash
-uv run python scripts/security_drills.py                                       # as operator
-docker compose exec -T news-agent python - --as-service < scripts/security_drills.py
-docker compose exec -T portfolio-agent python - --as-service < scripts/security_drills.py
-```
-
-- **No token, no work:** an agent, the gateway and an MCP server each refuse a call
-  without a token (401), before any tool is listed.
-- **Wrong caller, no work:** the operator's own token cannot assign work to an agent
-  (403); only the orchestrator can. A token minted for one service is refused by another.
-- **Prompt injection has no path:** the news agent, which reads untrusted company text,
-  cannot read prices and cannot reach the broker at all.
-- **Propose is not approve:** the portfolio agent can read the portfolio and propose,
-  but `decide` is refused; so is writing memory. The operator CLI cannot approve either.
-- **Audit:** the hash chain verifies; editing any row breaks it (unit-tested, and the
-  database refuses UPDATE, DELETE and TRUNCATE on `audit_log` outright).
-- **Separation of duties:** in the app, approve a suggested trade: the broker re-prices
-  it, refuses if the price moved more than 3% or a limit would now break, and records
-  who proposed and who approved as different identities.
-- **Official sources only:** ask the advisor about a company's fees. Its steps show
-  which official pages it searched and read; a non-official URL is refused by the
-  server, whatever the model asks for.
-
-## What Slice 0 taught
-
-- **A volatile field kills caching.** Tool results first included `fetched_at`;
-  every run had a different prompt, so nothing after step one was a cache hit.
-- **Models fail in ways the request doesn't.** gpt-oss tried to submit its answer by
-  calling a tool named `JSON`, and Groq rejected the whole turn. That needs its own
-  error class (422, correct and retry once), not "bad request".
-- **Citations are not grounding.** See [ADR 0005](docs/adr/0005-evidence-only-numbers.md).
-- **Tracing finds the real bottleneck.** The first PSX fetch for a symbol took
-  about 9 s, longer than all model calls in the run combined.
-
-## What Slice 1 taught
-
-- **Trace context travels differently per protocol.** A2A uses the HTTP `traceparent`
-  header; MCP carries it in the JSON-RPC `_meta` field so it also works over stdio.
-  The MCP client uses `httpx2`, so header instrumentation alone would have broken the trace.
-- **A2A turns integers into floats** (protobuf `Value`), so ids must never be
-  recomputed from data that crossed the wire.
-- **Parallel agents, serial bottleneck.** Both specialists share one MCP server whose
-  PSX limiter allows one fetch at a time; one tool call queued 12.5 s on a cold cache.
-- **Narrow context helped quality.** Specialists with one tool and a tight prompt did
-  not invent a company name or peer comparisons; the baseline did. It cost 1.7x
-  the tokens. See [ADR 0007](docs/adr/0007-orchestration-and-partial-failure.md).
-
-## What Slice 2 taught
-
-- **Fakes hide timeouts.** redis-py 8 defaults `socket_timeout` to 5 s, the same as
-  the consumer's blocking read, so every idle poll failed in Docker while every
-  fakeredis test passed. The consumer now refuses a block time that isn't below the
-  client's socket timeout.
-- **Two kinds of duplicate need two defences.** The scheduler firing twice produced
-  four *distinct* events; the inbox (`event_id`) let all four through and the business
-  key (`daily:<date>:<symbol>`) collapsed them to two runs.
-- **Resume time is the lease.** After the drill crash, Docker restarted the
-  orchestrator within seconds, but the run waited about 27 s for its 30 s lease to expire.
-  A shorter lease resumes faster but risks fencing out a slow, healthy worker.
-- **The redone step is the in-flight one.** Fundamentals ran twice (it was running at
-  the crash), which is why every step must be safe to repeat; here it cost 0 tokens
-  because the gateway cache served the repeat.
-
-## What Slice 3 taught
-
-- **The provider's real limits are in its error bodies.** Qwen's 1,000 output
-  tokens/min, charged at the *requested* `max_tokens`, appears in no header or doc,
-  only in a 429. Logging 429 bodies found it; an OTPM bucket in the gateway fixed it.
-- **Not every 429 means "wait".** "Request too large" can never succeed on that model,
-  so retrying it wasted a minute per call. Classify errors before retrying.
-- **Your counters and the provider's can disagree.** Groq's daily window rolls;
-  ours reset at UTC midnight. Failover on the 429 made it harmless.
-- **Most schema repairs were mechanical.** Seven points against a limit of six cost a
-  whole extra model call. Fixing that in code (`cap_claims`) removed the repairs.
-- **Real data has naming quirks.** PSX renames symbols during ex-dividend periods
-  (`HUBCXD`); four fundamentals analyses failed until the adapter learned it.
-- **The verifier catches real hallucinations and makes real mistakes.** It caught a
-  wrong SMA percentage, and falsely rejected "D-95" quoted from a title until it also
-  searched the evidence's text. Rejections are recorded, so the error rate is measurable.
-- **More parallelism made it slower.** Two briefs at once queued on the same
-  per-minute buckets; one at a time was faster per brief.
-
-## What Slice 4 and the app taught
-
-- **Least privilege needs a test, not a review.** The broker's database role had every
-  table grant but no `USAGE` on the schema, so it could not see its own tables. Only a
-  test that ran as that role caught it.
-- **Typed tool results or nothing.** An MCP tool returning a bare `dict` came back as
-  text, and the dashboard crashed on a key that was not there. Pydantic return types
-  give structured output; untyped returns do not.
-- **Streaming changes where retries can happen.** Before the first word, the gateway
-  can still retry or fall back to another model. After it, a retry would show the user
-  the same words twice, so a broken stream is an error.
-- **Rules in prompts are requests; rules in code are guarantees.** "Use official
-  sources only" holds because the server drops everything else, not because the
-  prompt asks nicely.
-- **Free search engines throttle bots.** The first real question failed on 429s and
-  empty pages. Sites' own sitemaps are free, unthrottled and official by construction.
-- **Models guess tickers.** Asked about Meezan, the model searched for MEZB and MEZL.
-  Resolving the company from names in the question, in code, fixed it.
-- **Know what each setting is fixed at.** Next.js bakes rewrite targets in at build
-  time, and its proxy cut every request off at 30 s, too short for the advisor.
-- **Your ports are not the only ones.** Port 8080 belonged to a local Apache; the app
-  moved to 8700 rather than touch it.
-
-## Tests
-
-```bash
-uv run pytest
-uv run ruff check .
+agents/          technical, fundamentals, news, debate (bull · bear · judge), portfolio,
+                 advisor, baseline
+mcp_servers/     market_data (+ evidence store), broker, memory (pgvector), official_web
+services/        orchestrator, scheduler, llm_gateway, dashboard (the app API)
+libs/            contracts (typed messages), agentkit (agent loop, A2A, MCP, auth, tracing),
+                 marketdata (PSX source, snapshots, indicators), eventbus (Redis Streams)
+web/             Next.js app (shadcn/ui, SWR, Recharts) and Playwright tests
+config/          access.toml (permissions), official_sources.toml (advisor allow-list)
+db/              migrations and least-privilege roles
+scripts/         security drills
+tests/           Python test suite
+docs/            project overview and architecture decision records
 ```
