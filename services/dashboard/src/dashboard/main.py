@@ -130,6 +130,11 @@ async def orch(method: str, path: str, **kw) -> dict:
 _history_cache: dict[tuple[str, int], tuple[float, dict]] = {}
 
 
+def _loggable(text: str) -> str:
+    """Strip line breaks, so a value cannot forge extra log lines."""
+    return text.replace("\r", "").replace("\n", "")[:40]
+
+
 async def history(symbol: str, days: int) -> dict | None:
     """Daily closes; cached 10 minutes (they change once a day)."""
     key = (symbol, days)
@@ -139,7 +144,7 @@ async def history(symbol: str, days: int) -> dict | None:
     try:
         h = await market("get_price_history", symbol=symbol, days=days)
     except Exception as e:  # noqa: BLE001
-        log.warning("no history for %r: %s", symbol, e)
+        log.warning("no history for %s: %s", _loggable(symbol), e)
         return None
     _history_cache[key] = (time.time(), h)
     return h
@@ -275,11 +280,14 @@ async def login(body: Login, request: Request) -> Response:
     if request.headers.get("x-desk-request") != "1":
         raise HTTPException(403, "missing X-Desk-Request header")
     if not check_password(body.user, body.password):
-        log.warning("failed login for %r", body.user[:40])
+        # The typed name is not logged: it is attacker-controlled text.
+        log.warning("failed login from %s", request.client.host if request.client else "?")
         await asyncio.sleep(1.0)  # slows guessing
         raise HTTPException(401, "Wrong user or password")
-    r = JSONResponse({"user": body.user})
-    r.set_cookie(COOKIE, make_session(body.user), max_age=SESSION_S, httponly=True,
+    # Success proves body.user == USER; the cookie is built from the server's own value,
+    # so nothing the client typed is written into it.
+    r = JSONResponse({"user": USER})
+    r.set_cookie(COOKIE, make_session(USER), max_age=SESSION_S, httponly=True,
                  samesite="strict", path="/")
     return r
 
