@@ -16,6 +16,7 @@ export const sse = (events: object[]) =>
 
 export interface MockOptions {
   signedIn?: boolean
+  expiredOnce?: boolean                 // the first data call finds the access token expired
   chat?: object[]                       // events for /api/chat/stream
   system?: unknown
 }
@@ -23,6 +24,7 @@ export interface MockOptions {
 export async function mockApi(page: Page, opts: MockOptions = {}) {
   const signedIn = opts.signedIn ?? true
   const calls: { url: string; body: unknown }[] = []
+  let expired = false
 
   await page.route("**/api/**", async (route) => {
     const req = route.request()
@@ -30,12 +32,27 @@ export async function mockApi(page: Page, opts: MockOptions = {}) {
     const body = req.postData() ? JSON.parse(req.postData()!) : undefined
     calls.push({ url: path, body })
 
-    if (path === "/api/login") {
+    const me = { user: "Ayesha Khan", name: "Ayesha Khan", email: "ayesha@example.com", account: "u_test" }
+    if (path === "/api/auth/login") {
       const ok = (body as { password?: string })?.password === "test-password"
-      return ok ? json(route, { user: "operator" }) : json(route, { detail: "wrong user or password" }, 401)
+      return ok ? json(route, me) : json(route, { detail: "Wrong email or password" }, 401)
     }
-    if (path === "/api/logout") return json(route, {})
+    if (path === "/api/auth/signup") {
+      const b = body as { name: string; email: string }
+      return b.email === "taken@example.com"
+        ? json(route, { detail: "An account with that email already exists. Sign in instead." }, 409)
+        : json(route, { ...me, name: b.name, user: b.name, email: b.email })
+    }
+    if (path === "/api/auth/logout") return json(route, {})
+    if (path === "/api/auth/refresh") {
+      return signedIn ? json(route, me) : json(route, { detail: "not signed in" }, 401)
+    }
     if (!signedIn) return json(route, { detail: "not signed in" }, 401)
+    if (opts.expiredOnce && !expired && path !== "/api/events") {
+      expired = true
+      return json(route, { detail: "not signed in" }, 401)
+    }
+    if (path === "/api/me") return json(route, { ...me, watchlist: [], market_open: false })
 
     if (path === "/api/events") {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: ": connected\n\n" })

@@ -50,9 +50,20 @@ def pg_url():
         pytest.skip(f"docker unavailable: {e}")
 
     async def migrate():
-        c = await asyncpg.connect(container.get_connection_url())
+        # The container reports ready before Postgres accepts connections reliably (the
+        # first connect can be reset, on Windows especially): retry briefly.
+        for attempt in range(30):
+            try:
+                c = await asyncpg.connect(container.get_connection_url())
+                await c.fetchval("SELECT 1")
+                break
+            except (OSError, asyncpg.PostgresError):
+                if attempt == 29:
+                    raise
+                await asyncio.sleep(0.5)
         await c.execute("CREATE ROLE gateway; CREATE ROLE orchestrator; "
-                        "CREATE ROLE market_data; CREATE ROLE memory; CREATE ROLE broker;")
+                        "CREATE ROLE market_data; CREATE ROLE memory; CREATE ROLE broker; "
+                        "CREATE ROLE dashboard;")
         for f in sorted(MIGRATIONS.glob("[0-9]*.sql")):
             await c.execute(f.read_text(encoding="utf-8"))
         await c.close()

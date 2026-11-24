@@ -7,12 +7,16 @@
 
 Two identities meet here. The *service* proves itself to every backend with its key
 (identity "dashboard": the only holder of broker:decide and broker:trade); the
-*human* proves themself to this service with a password. The broker records both
-("dashboard:<user>"), so the audit log says which person acted.
+*human* proves themself to this service by signing in (auth.py: users in Postgres,
+a 15-minute JWT, a rotating refresh token). The broker records both
+("dashboard:<account>"), so the audit log says which person acted.
 
-Session: an HMAC-signed cookie (HttpOnly, SameSite=Strict, 8 h). Every state-changing
-request must also carry the header `X-Desk-Request: 1`, which a cross-site form
-cannot send: CSRF protection without tokens in forms.
+Many users, one desk. Each user has their own demo account, watchlist and alerts; every
+call to the broker names the signed-in user's account, taken from their token, never
+from the request. Research is shared: a brief on a stock is the same for everyone.
+
+Every state-changing request must also carry the header `X-Desk-Request: 1`, which a
+cross-site form cannot send: CSRF protection without tokens in forms.
 
 Demo account only: test money, real PSX prices. Nothing here reaches a brokerage.
 """
@@ -20,7 +24,6 @@ Demo account only: test money, real PSX prices. Nothing here reaches a brokerage
 import asyncio
 import contextlib
 import hashlib
-import hmac
 import json
 import logging
 import os
@@ -29,6 +32,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
+from typing import Annotated
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -43,6 +47,19 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 
+from dashboard.auth import (
+    ACCESS_S,
+    EMAIL_RE,
+    MIN_PASSWORD,
+    REFRESH_S,
+    EmailTaken,
+    RefreshRaced,
+    User,
+    UserStore,
+    issue_access,
+    read_access,
+)
+
 log = logging.getLogger("dashboard")
 
 BROKER = os.getenv("BROKER_MCP_URL", "http://127.0.0.1:8600/mcp")
@@ -53,61 +70,65 @@ ADVISOR = os.getenv("ADVISOR_URL", "http://127.0.0.1:8406")
 # A new user's starting watchlist. After that, each user's list lives in the broker.
 DEFAULT_WATCHLIST = [s.strip().upper() for s in os.getenv("WATCHLIST", "LUCK,ENGRO,HBL").split(",")
                      if s.strip()]
-USER = os.getenv("DASHBOARD_USER", "operator")
-SESSION_S = 8 * 3600
-COOKIE = "desk_session"
+OPERATOR_EMAIL = os.getenv("OPERATOR_EMAIL", "operator@psx-desk.local").lower()
+OPERATOR = "operator"  # the account that existed before sign-up, and its demo money
+SIGNUP_ENABLED = os.getenv("SIGNUP_ENABLED", "1") == "1"
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "0") == "1"
+ACCESS_COOKIE, REFRESH_COOKIE = "desk_access", "desk_refresh"
 PKT = ZoneInfo("Asia/Karachi")
 INITIAL_CAPITAL = 1_000_000.0
 BROKER_TOOLS = {"get_portfolio", "list_proposals", "get_proposal", "list_fills", "decide",
                 "place_order", "audit_log", "verify_audit", "get_watchlist", "init_watchlist",
                 "watch", "unwatch", "list_alerts", "list_alert_events", "create_alert",
-                "cancel_alert"}
+                "cancel_alert", "open_account", "activity"}
 
 
 # ---------------------------------------------------------------- sessions
 
 
-def _secret() -> bytes:
+def _secret() -> str:
     s = os.getenv("DASHBOARD_SESSION_SECRET", "")
-    if len(s) < 16:
-        raise RuntimeError("DASHBOARD_SESSION_SECRET must be set (16+ characters)")
-    return s.encode()
+    if len(s) < 32:
+        raise RuntimeError("DASHBOARD_SESSION_SECRET must be set (32+ characters)")
+    return s
 
 
-def _sign(*parts: str) -> str:
-    return hmac.new(_secret(), "|".join(parts).encode(), hashlib.sha256).hexdigest()
-
-
-def make_session(user: str, now: float | None = None) -> str:
-    exp = str(int((now or time.time()) + SESSION_S))
-    return f"{user}|{exp}|{_sign('session', user, exp)}"
-
-
-def read_session(cookie: str | None, now: float | None = None) -> str | None:
-    try:
-        user, exp, sig = (cookie or "").split("|")
-    except ValueError:
-        return None
-    if not hmac.compare_digest(sig, _sign("session", user, exp)):
-        return None
-    if int(exp) < (now or time.time()):
-        return None
-    return user
-
-
-def check_password(user: str, password: str) -> bool:
-    expected = os.getenv("DASHBOARD_PASSWORD", "")
-    return bool(expected) and hmac.compare_digest(user, USER) and \
-        hmac.compare_digest(password.encode(), expected.encode())
-
-
-def current_user(request: Request) -> str:
-    user = read_session(request.cookies.get(COOKIE))
+def current_user(request: Request) -> User:
+    """The signed-in user, from their access token. 401 when it is missing or expired:
+    the browser then refreshes it (POST /api/auth/refresh) and retries."""
+    user = read_access(_secret(), request.cookies.get(ACCESS_COOKIE))
     if user is None:
         raise HTTPException(401, "not signed in")
     if request.method not in ("GET", "HEAD") and request.headers.get("x-desk-request") != "1":
         raise HTTPException(403, "missing X-Desk-Request header")
     return user
+
+
+Me = Annotated[User, Depends(current_user)]  # the signed-in user, on any endpoint
+
+
+class Limiter:
+    """Fixed-window counters in Redis (in memory when there is none, as in tests)."""
+
+    def __init__(self) -> None:
+        self.redis: Redis | None = None
+        self.mem: dict[str, tuple[float, int]] = {}
+
+    async def hit(self, key: str, limit: int, window_s: int) -> bool:
+        """Count one attempt; False once `limit` is passed within the window."""
+        if self.redis is not None:
+            n = await self.redis.incr(f"rl:{key}")
+            if n == 1:
+                await self.redis.expire(f"rl:{key}", window_s)
+            return n <= limit
+        start, n = self.mem.get(key, (time.time(), 0))
+        if time.time() - start > window_s:
+            start, n = time.time(), 0
+        self.mem[key] = (start, n + 1)
+        return n + 1 <= limit
+
+
+limiter = Limiter()
 
 
 # ---------------------------------------------------------------- backends
@@ -165,13 +186,15 @@ async def history(symbol: str, days: int) -> dict | None:
     return h
 
 
-def account(user: str) -> str:
-    """The broker's account key for a signed-in user."""
-    return user.lower()
+async def watchlist_of(account: str) -> list[str]:
+    return await broker("get_watchlist", account=account)
 
 
-async def watchlist_of(user: str) -> list[str]:
-    return await broker("get_watchlist", account=account(user))
+async def provision(account: str) -> None:
+    """A user's demo account and starting watchlist. Idempotent, so it runs at every
+    sign-in and heals a sign-up whose broker call failed."""
+    await broker("open_account", account=account)
+    await broker("init_watchlist", account=account, symbols=DEFAULT_WATCHLIST)
 
 
 def market_open(now: datetime | None = None) -> bool:
@@ -235,57 +258,70 @@ class Hub:
                 await asyncio.sleep(5)
 
     async def broker_loop(self) -> None:
-        """The broker publishes no events, so watch it: cheap reads, every 4 s. New
-        alert events go to the browser as "alert" (a notification), once each."""
-        seen = None
-        last_alert: int | None = None
+        """The broker publishes no events, so follow its audit log: one cheap read every
+        4 s for all users, whatever their number. Each change is tagged with its account
+        and goes only to that account's tabs: "portfolio" (proposals, fills) tells the
+        screens to refresh, "alert" is a price-alert notification."""
+        cursor: int | None = None
         while True:
             try:
-                props = await broker("list_proposals", limit=20)
-                fills = await broker("list_fills", limit=1)
-                digest = json.dumps([[p["id"], p["status"]] for p in props] + fills,
-                                    sort_keys=True)
-                if seen is not None and digest != seen:
-                    self.publish("portfolio", {"pending": sum(p["status"] == "pending"
-                                                              for p in props)})
-                seen = digest
-                events = await broker("list_alert_events", account=account(USER), limit=10)
-                if last_alert is not None:
-                    for ev in reversed([e for e in events if e["id"] > last_alert]):
-                        self.publish("alert", ev, account=ev["account"])
-                last_alert = max([e["id"] for e in events], default=last_alert or 0)
+                feed = await broker("activity", after_id=cursor)
+                if cursor is not None:
+                    self.route(feed["items"])
+                cursor = feed["cursor"]
             except Exception as e:  # noqa: BLE001
                 log.warning("broker watch failed: %s", e)
             await asyncio.sleep(4)
+
+    def route(self, items: list[dict]) -> None:
+        touched: set[str] = set()
+        for it in items:
+            acct, action, d = it.get("account"), it["action"], it["details"]
+            if not acct:
+                continue
+            if action.startswith("alert."):
+                self.publish("alert", {"kind": action.removeprefix("alert."),
+                                       "id": d.get("event_id"), "account": acct,
+                                       **{k: d.get(k) for k in ("symbol", "price", "drop_pct",
+                                                                "loss_pkr")}}, account=acct)
+            elif action.startswith(("proposal.", "order.", "account.")):
+                touched.add(acct)
+        for acct in touched:
+            self.publish("portfolio", {}, account=acct)
 
 
 hub = Hub()
 
 
 async def warm_sparklines() -> None:
-    """Keep the watchlist's 30-day closes cached, so Today never waits on a cold PSX fetch
+    """Keep the 30-day closes of the stocks people are looking at cached (the default
+    list, plus every watchlist with a tab open), so Today never waits on a cold PSX fetch
     (about 13 s per symbol through the rate-limited data server)."""
     while True:
-        try:
-            symbols = await watchlist_of(USER)
-        except Exception as e:  # noqa: BLE001
-            log.warning("watchlist unavailable: %s", e)
-            symbols = DEFAULT_WATCHLIST
+        symbols = dict.fromkeys(DEFAULT_WATCHLIST)
+        for acct in sorted(set(hub.clients.values())):
+            try:
+                symbols |= dict.fromkeys(await watchlist_of(acct))
+            except Exception as e:  # noqa: BLE001
+                log.warning("watchlist unavailable: %s", e)
         for sym in symbols:
             _history_cache.pop((sym, 30), None)
             await history(sym, 30)
         await asyncio.sleep(540)  # just inside the 10-minute cache window
 
 
-async def seed_watchlist() -> None:
-    """Give the operator account its starting watchlist once (retrying while the broker
-    starts). The broker ignores this for an account that already has one."""
+async def bootstrap(users: UserStore) -> None:
+    """The operator user (password from .env) and their demo account, once the broker
+    is up. Retries while it starts."""
+    pw = os.getenv("DASHBOARD_PASSWORD", "")
+    if pw:
+        await users.ensure_operator(OPERATOR_EMAIL, pw, account=OPERATOR)
     for _ in range(30):
         try:
-            await broker("init_watchlist", account=account(USER), symbols=DEFAULT_WATCHLIST)
+            await provision(OPERATOR)
             return
         except Exception as e:  # noqa: BLE001
-            log.warning("watchlist seed failed, retrying: %s", e)
+            log.warning("operator account setup failed, retrying: %s", e)
             await asyncio.sleep(10)
 
 
@@ -294,8 +330,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _secret()
     redis = Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"),
                            decode_responses=True, socket_timeout=30)
+    limiter.redis = redis
+    app.state.users = await UserStore.connect(os.environ["DATABASE_URL"])
     app.state.advisor = AgentDirectory([ADVISOR], timeout_s=180)
-    tasks = [asyncio.create_task(seed_watchlist()),
+    tasks = [asyncio.create_task(bootstrap(app.state.users)),
              asyncio.create_task(hub.quotes_loop()), asyncio.create_task(hub.briefs_loop(redis)),
              asyncio.create_task(hub.broker_loop()), asyncio.create_task(warm_sparklines())]
     yield
@@ -304,6 +342,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await asyncio.gather(*tasks, return_exceptions=True)
     await redis.aclose()
     await app.state.advisor.aclose()
+    await app.state.users.close()
 
 
 app = FastAPI(title="desk-app-api", lifespan=lifespan, docs_url=None, redoc_url=None,
@@ -321,39 +360,118 @@ async def no_store(request: Request, call_next):
 # ---------------------------------------------------------------- auth endpoints
 
 
-class Login(BaseModel):
-    # A strict format: the name is written to logs and into the session cookie.
-    user: str = Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9_.@-]+$")
-    password: str = Field(max_length=200)
+class Credentials(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=200)
 
 
-@app.post("/api/login")
-async def login(body: Login, request: Request) -> Response:
+class SignUp(Credentials):
+    name: str = Field(min_length=1, max_length=60)
+    password: str = Field(min_length=MIN_PASSWORD, max_length=200)
+
+
+def _csrf(request: Request) -> None:
     if request.headers.get("x-desk-request") != "1":
         raise HTTPException(403, "missing X-Desk-Request header")
-    if not check_password(body.user, body.password):
-        # The typed name is not logged: it is attacker-controlled text.
-        log.warning("failed login from %s", request.client.host if request.client else "?")
-        await asyncio.sleep(1.0)  # slows guessing
-        raise HTTPException(401, "Wrong user or password")
-    # Success proves body.user == USER; the cookie is built from the server's own value,
-    # so nothing the client typed is written into it.
-    r = JSONResponse({"user": USER})
-    r.set_cookie(COOKIE, make_session(USER), max_age=SESSION_S, httponly=True,
-                 samesite="strict", path="/")
+
+
+def _ip(request: Request) -> str:
+    return request.client.host if request.client else "?"
+
+
+def _signed_in(user: User, refresh: str) -> Response:
+    r = JSONResponse(_profile(user))
+    r.set_cookie(ACCESS_COOKIE, issue_access(_secret(), user), max_age=ACCESS_S,
+                 httponly=True, samesite="strict", secure=COOKIE_SECURE, path="/")
+    r.set_cookie(REFRESH_COOKIE, refresh, max_age=REFRESH_S, httponly=True,
+                 samesite="strict", secure=COOKIE_SECURE, path="/api/auth")
     return r
 
 
-@app.post("/api/logout")
-async def logout() -> Response:
+def _profile(user: User) -> dict:
+    return {"user": user.name, "name": user.name, "email": user.email,
+            "account": user.account}
+
+
+@app.post("/api/auth/signup")
+async def signup(body: SignUp, request: Request) -> Response:
+    _csrf(request)
+    if not SIGNUP_ENABLED:
+        raise HTTPException(403, "Sign-up is closed on this server")
+    email = body.email.strip().lower()
+    if not EMAIL_RE.match(email):
+        raise HTTPException(422, "That doesn't look like an email address")
+    if not await limiter.hit(f"signup:{_ip(request)}", 10, 3600):
+        raise HTTPException(429, "Too many sign-ups from here. Try again in an hour.")
+    try:
+        user = await request.app.state.users.create_user(email, body.name.strip(),
+                                                         body.password)
+    except EmailTaken:
+        raise HTTPException(409, "An account with that email already exists. "
+                                 "Sign in instead.") from None
+    try:
+        await provision(user.account)
+    except Exception as e:  # noqa: BLE001  healed at the next sign-in
+        log.warning("account setup for a new user failed: %s", e)
+    log.info("new user signed up (account %s)", user.account)
+    return _signed_in(user, await request.app.state.users.start_session(
+        user, request.headers.get("user-agent", "")))
+
+
+@app.post("/api/auth/login")
+async def login(body: Credentials, request: Request) -> Response:
+    _csrf(request)
+    email = body.email.strip().lower()
+    key = hashlib.sha256(email.encode()).hexdigest()[:16]
+    if not (await limiter.hit(f"login:ip:{_ip(request)}", 30, 900)
+            and await limiter.hit(f"login:email:{key}", 10, 900)):
+        raise HTTPException(429, "Too many attempts. Wait 15 minutes and try again.")
+    user = await request.app.state.users.authenticate(email, body.password)
+    if user is None:
+        # The typed email is not logged: it is attacker-controlled text.
+        log.warning("failed login from %s", _ip(request))
+        await asyncio.sleep(1.0)  # slows guessing
+        raise HTTPException(401, "Wrong email or password")
+    try:
+        await provision(user.account)
+    except Exception as e:  # noqa: BLE001
+        log.warning("account check at sign-in failed: %s", e)
+    return _signed_in(user, await request.app.state.users.start_session(
+        user, request.headers.get("user-agent", "")))
+
+
+@app.post("/api/auth/refresh")
+async def refresh(request: Request) -> Response:
+    _csrf(request)
+    raw = request.cookies.get(REFRESH_COOKIE)
+    if not raw:
+        raise HTTPException(401, "not signed in")
+    try:
+        got = await request.app.state.users.rotate(raw, request.headers.get("user-agent", ""))
+    except RefreshRaced:
+        raise HTTPException(409, "refreshed by another tab; retry") from None
+    if got is None:
+        r = JSONResponse({"detail": "session ended; sign in again"}, status_code=401)
+        r.delete_cookie(REFRESH_COOKIE, path="/api/auth")
+        return r
+    return _signed_in(*got)
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request) -> Response:
+    _csrf(request)
+    if raw := request.cookies.get(REFRESH_COOKIE):
+        await request.app.state.users.end_session(raw)
     r = JSONResponse({"ok": True})
-    r.delete_cookie(COOKIE, path="/")
+    r.delete_cookie(ACCESS_COOKIE, path="/")
+    r.delete_cookie(REFRESH_COOKIE, path="/api/auth")
     return r
 
 
 @app.get("/api/me")
-async def me(user: str = Depends(current_user)) -> dict:
-    return {"user": user, "watchlist": await watchlist_of(user), "market_open": market_open()}
+async def me(user: Me) -> dict:
+    return {**_profile(user), "watchlist": await watchlist_of(user.account),
+            "market_open": market_open()}
 
 
 # ---------------------------------------------------------------- reads
@@ -370,8 +488,8 @@ def _desk_summary(b: dict | None) -> dict | None:
 
 
 @app.get("/api/overview")
-async def overview(user: str = Depends(current_user)) -> dict:
-    watch = await watchlist_of(user)
+async def overview(user: Me) -> dict:
+    watch = await watchlist_of(user.account)
 
     async def latest() -> dict:
         if not watch:
@@ -379,9 +497,9 @@ async def overview(user: str = Depends(current_user)) -> dict:
         return await orch("GET", "/v1/briefs/latest", params={"symbols": ",".join(watch)})
 
     briefs, pf, pending, alerts, fired = await asyncio.gather(
-        latest(), broker("get_portfolio"), broker("list_proposals", status="pending", limit=20),
-        broker("list_alerts", account=account(user), active_only=True),
-        broker("list_alert_events", account=account(user), limit=5))
+        latest(), broker("get_portfolio", account=user.account), broker("list_proposals", account=user.account, status="pending", limit=20),
+        broker("list_alerts", account=user.account, active_only=True),
+        broker("list_alert_events", account=user.account, limit=5))
     by_symbol = {b["symbol"]: b for b in briefs["briefs"]}
     quotes = (hub.quotes or {}).get("quotes", {})
     sparks = await asyncio.gather(*(history(s, 30) for s in watch))
@@ -391,31 +509,31 @@ async def overview(user: str = Depends(current_user)) -> dict:
         rows.append({"symbol": sym, "price": q.get("price"), "change_pct": q.get("change_pct"),
                      "spark": [p["close"] for p in (h or {}).get("points", [])],
                      "desk": _desk_summary(by_symbol.get(sym))})
-    return {"user": user, "market_open": market_open(), "quotes_at": hub.quotes.get("fetched_at"),
+    return {"user": user.name, "market_open": market_open(), "quotes_at": hub.quotes.get("fetched_at"),
             "watchlist": rows, "portfolio": pf, "pending": pending, "alerts": alerts,
             "alert_events": fired, "initial_capital": INITIAL_CAPITAL}
 
 
 @app.get("/api/market")
-async def market_board(user: str = Depends(current_user)) -> dict:
+async def market_board(user: Me) -> dict:
     """Every stock on PSX with name, sector and today's numbers, for the all-stocks list
     and search. Served from memory (refreshed by the live loop), so it is instant."""
     if not hub.board:
         await hub.refresh_board()
     if not hub.board:
         raise HTTPException(503, "PSX market data is unavailable right now")
-    return {**hub.board, "market_open": market_open(), "watchlist": await watchlist_of(user)}
+    return {**hub.board, "market_open": market_open(), "watchlist": await watchlist_of(user.account)}
 
 
 @app.get("/api/stocks/{symbol}")
-async def stock(symbol: str, user: str = Depends(current_user)) -> dict:
+async def stock(symbol: str, user: Me) -> dict:
     symbol = symbol.upper()
     if not symbol.isalnum() or len(symbol) > 12:
         raise HTTPException(400, "not a PSX ticker")
     briefs, h, pf, watch, alerts = await asyncio.gather(
         orch("GET", "/v1/briefs/latest", params={"symbols": symbol}),
-        history(symbol, 365), broker("get_portfolio"), watchlist_of(user),
-        broker("list_alerts", account=account(user)))
+        history(symbol, 365), broker("get_portfolio", account=user.account), watchlist_of(user.account),
+        broker("list_alerts", account=user.account))
     news = None
     with contextlib.suppress(Exception):
         news = (await market("get_quotes", symbols=[symbol]))["quotes"].get(symbol)
@@ -429,10 +547,10 @@ async def stock(symbol: str, user: str = Depends(current_user)) -> dict:
 
 
 @app.get("/api/portfolio")
-async def portfolio(user: str = Depends(current_user)) -> dict:
-    pf, fills, props = await asyncio.gather(broker("get_portfolio"),
-                                            broker("list_fills", limit=200),
-                                            broker("list_proposals", limit=100))
+async def portfolio(user: Me) -> dict:
+    pf, fills, props = await asyncio.gather(broker("get_portfolio", account=user.account),
+                                            broker("list_fills", account=user.account, limit=200),
+                                            broker("list_proposals", account=user.account, limit=100))
     return {"portfolio": pf, "fills": fills, "proposals": props,
             "curve": await equity_curve(fills), "initial_capital": INITIAL_CAPITAL}
 
@@ -480,12 +598,12 @@ async def equity_curve(fills: list[dict]) -> list[dict]:
 
 
 @app.get("/api/proposals")
-async def proposals(status: str | None = None, user: str = Depends(current_user)) -> list:
-    return await broker("list_proposals", status=status, limit=100)
+async def proposals(user: Me, status: str | None = None) -> list:
+    return await broker("list_proposals", account=user.account, status=status, limit=100)
 
 
 @app.get("/api/runs/{run_id}")
-async def run_status(run_id: uuid.UUID, user: str = Depends(current_user)) -> dict:
+async def run_status(run_id: uuid.UUID, user: Me) -> dict:
     r = await orch("GET", f"/v1/runs/{run_id}")
     return {"id": r["id"], "symbol": r["symbol"], "status": r["status"],
             "steps": {k: v["status"] for k, v in r.get("steps", {}).items()},
@@ -493,7 +611,7 @@ async def run_status(run_id: uuid.UUID, user: str = Depends(current_user)) -> di
 
 
 @app.get("/api/system")
-async def system(request: Request, user: str = Depends(current_user)) -> dict:
+async def system(request: Request, user: Me) -> dict:
     async def safe(coro):
         try:
             return await coro
@@ -506,7 +624,7 @@ async def system(request: Request, user: str = Depends(current_user)) -> dict:
 
     agents, b, audit_ok, audit = await asyncio.gather(
         safe(orch("GET", "/v1/agents")), safe(budget()), safe(broker("verify_audit")),
-        safe(broker("audit_log", limit=60)))
+        safe(broker("audit_log", limit=60, account=user.account)))
     # The advisor answers the app directly, not through the orchestrator: add it here.
     advisor = request.app.state.advisor
     try:
@@ -532,10 +650,10 @@ class DecideBody(BaseModel):
 
 @app.post("/api/proposals/{proposal_id}/decide")
 async def decide(proposal_id: uuid.UUID, body: DecideBody,
-                 user: str = Depends(current_user)) -> dict:
+                 user: Me) -> dict:
     try:
-        return await broker("decide", proposal_id=str(proposal_id), approve=body.approve,
-                            decided_by=user, note=body.note)
+        return await broker("decide", account=user.account, proposal_id=str(proposal_id), approve=body.approve,
+                            decided_by=user.account, note=body.note)
     except McpToolError as e:
         raise HTTPException(409, str(e)) from e
 
@@ -549,11 +667,11 @@ class TradeBody(BaseModel):
 
 
 @app.post("/api/trades")
-async def trade(body: TradeBody, user: str = Depends(current_user)) -> dict:
+async def trade(body: TradeBody, user: Me) -> dict:
     try:
-        return await broker("place_order", client_order_id=body.client_order_id,
+        return await broker("place_order", account=user.account, client_order_id=body.client_order_id,
                             symbol=body.symbol.upper(), side=body.side,
-                            quantity=body.quantity, placed_by=user, note=body.note)
+                            quantity=body.quantity, placed_by=user.account, note=body.note)
     except McpToolError as e:
         raise HTTPException(409, str(e)) from e
 
@@ -574,22 +692,22 @@ def _listed(symbol: str) -> str:
 
 
 @app.get("/api/watchlist")
-async def get_watchlist(user: str = Depends(current_user)) -> dict:
-    return {"watchlist": await watchlist_of(user)}
+async def get_watchlist(user: Me) -> dict:
+    return {"watchlist": await watchlist_of(user.account)}
 
 
 @app.put("/api/watchlist/{symbol}")
-async def add_to_watchlist(symbol: str, user: str = Depends(current_user)) -> dict:
+async def add_to_watchlist(symbol: str, user: Me) -> dict:
     try:
-        symbols = await broker("watch", account=account(user), symbol=_listed(symbol))
+        symbols = await broker("watch", account=user.account, symbol=_listed(symbol))
     except McpToolError as e:
         raise HTTPException(409, str(e)) from e
     return {"watchlist": symbols}
 
 
 @app.delete("/api/watchlist/{symbol}")
-async def remove_from_watchlist(symbol: str, user: str = Depends(current_user)) -> dict:
-    return {"watchlist": await broker("unwatch", account=account(user), symbol=_ticker(symbol))}
+async def remove_from_watchlist(symbol: str, user: Me) -> dict:
+    return {"watchlist": await broker("unwatch", account=user.account, symbol=_ticker(symbol))}
 
 
 class AlertBody(BaseModel):
@@ -600,28 +718,28 @@ class AlertBody(BaseModel):
 
 
 @app.get("/api/alerts")
-async def list_alerts(user: str = Depends(current_user)) -> dict:
+async def list_alerts(user: Me) -> dict:
     rules, events = await asyncio.gather(
-        broker("list_alerts", account=account(user)),
-        broker("list_alert_events", account=account(user), limit=50))
+        broker("list_alerts", account=user.account),
+        broker("list_alert_events", account=user.account, limit=50))
     return {"alerts": rules, "events": events}
 
 
 @app.post("/api/alerts")
-async def create_alert(body: AlertBody, user: str = Depends(current_user)) -> dict:
+async def create_alert(body: AlertBody, user: Me) -> dict:
     try:
-        return await broker("create_alert", account=account(user), symbol=_listed(body.symbol),
+        return await broker("create_alert", account=user.account, symbol=_listed(body.symbol),
                             kind=body.kind, threshold=body.threshold, days=body.days,
-                            created_by=account(user))
+                            created_by=user.account)
     except McpToolError as e:
         raise HTTPException(409, str(e)) from e
 
 
 @app.delete("/api/alerts/{alert_id}")
-async def cancel_alert(alert_id: uuid.UUID, user: str = Depends(current_user)) -> dict:
+async def cancel_alert(alert_id: uuid.UUID, user: Me) -> dict:
     try:
-        return await broker("cancel_alert", account=account(user), alert_id=str(alert_id),
-                            cancelled_by=account(user))
+        return await broker("cancel_alert", account=user.account, alert_id=str(alert_id),
+                            cancelled_by=user.account)
     except McpToolError as e:
         raise HTTPException(404, str(e)) from e
 
@@ -631,10 +749,10 @@ class ResearchBody(BaseModel):
 
 
 @app.post("/api/research")
-async def research(body: ResearchBody, user: str = Depends(current_user)) -> dict:
+async def research(body: ResearchBody, user: Me) -> dict:
     sym = body.symbol.upper()
     return await orch("POST", "/v1/briefs", json={"symbol": sym, "lane": "interactive"},
-                      headers={"Idempotency-Key": f"app:{user}:{sym}:"
+                      headers={"Idempotency-Key": f"app:{user.account}:{sym}:"
                                                   f"{datetime.now(UTC):%Y%m%d%H%M}"})
 
 
@@ -648,10 +766,10 @@ class ChatBody(BaseModel):
 
 
 @app.post("/api/chat")
-async def chat(body: ChatBody, request: Request, user: str = Depends(current_user)) -> dict:
+async def chat(body: ChatBody, request: Request, user: Me) -> dict:
     try:
         return await request.app.state.advisor.call(
-            "chat", {"user": user, "messages": [m.model_dump() for m in body.messages[-12:]]})
+            "chat", {"user": user.account, "messages": [m.model_dump() for m in body.messages[-12:]]})
     except Exception as e:
         log.warning("advisor failed: %s", e)
         raise HTTPException(502, "The advisor is unavailable right now. Try again shortly.") \
@@ -660,10 +778,10 @@ async def chat(body: ChatBody, request: Request, user: str = Depends(current_use
 
 @app.post("/api/chat/stream")
 async def chat_stream(body: ChatBody, request: Request,
-                      user: str = Depends(current_user)) -> StreamingResponse:
+                      user: Me) -> StreamingResponse:
     """The advisor's reply as server-sent events, relayed from its A2A stream:
     tool steps and answer text as they happen, then {"type": "done", ...the reply}."""
-    payload = {"user": user, "messages": [m.model_dump() for m in body.messages[-12:]]}
+    payload = {"user": user.account, "messages": [m.model_dump() for m in body.messages[-12:]]}
 
     async def events():
         try:
@@ -688,9 +806,9 @@ async def chat_stream(body: ChatBody, request: Request,
 
 
 @app.get("/api/events")
-async def events(request: Request, user: str = Depends(current_user)) -> StreamingResponse:
+async def events(request: Request, user: Me) -> StreamingResponse:
     q: asyncio.Queue = asyncio.Queue()
-    hub.clients[q] = account(user)
+    hub.clients[q] = user.account
 
     async def stream():
         try:

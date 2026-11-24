@@ -51,17 +51,18 @@ async def as_service(urls: dict) -> None:
                                    {"symbol": "LUCK"}, "lacks scope 'market:read'")
         report("news agent cannot read prices (it holds news:read only)", ok, d)
         ok, d = await refused_tool(urls["broker"], "propose_order",
-                                   {"client_order_id": "drill:news", "symbol": "LUCK",
+                                   {"account": "operator", "client_order_id": "drill:news", "symbol": "LUCK",
                                     "side": "buy", "quantity": 1, "rationale": "x" * 20,
                                     "brief": {}}, "forbidden")
         report("news agent cannot reach the broker at all (an injected 'buy' has no path)",
                ok, d)
     if me.name == "portfolio-agent":
         async with McpToolset(urls["broker"], allow={"get_portfolio"}) as ts:
-            pf = await ts.call("get_portfolio")
+            pf = await ts.call("get_portfolio", account="operator")
         report("portfolio agent can read the portfolio", True, f"equity {pf['equity']:,.0f}")
         ok, d = await refused_tool(urls["broker"], "decide",
-                                   {"proposal_id": "00000000-0000-0000-0000-000000000000",
+                                   {"account": "operator",
+                                    "proposal_id": "00000000-0000-0000-0000-000000000000",
                                     "approve": True, "decided_by": "agent"},
                                    "lacks scope 'broker:decide'")
         report("portfolio agent cannot approve a trade (no broker:decide)", ok, d)
@@ -102,7 +103,8 @@ async def as_service(urls: dict) -> None:
             v = await ts.call("verify_audit")
         report("audit hash chain verifies", v["ok"], str(v))
         ok, d = await refused_tool(urls["broker"], "decide",
-                                   {"proposal_id": "00000000-0000-0000-0000-000000000000",
+                                   {"account": "operator",
+                                    "proposal_id": "00000000-0000-0000-0000-000000000000",
                                     "approve": True, "decided_by": "me"},
                                    "lacks scope 'broker:decide'")
         report("operator CLI cannot approve trades either: only the dashboard", ok, d)

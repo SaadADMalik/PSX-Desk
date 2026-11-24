@@ -199,9 +199,10 @@ def build_tools(user: str, used: list[str], proposals: list[str]) -> list[Tool]:
     async def my_portfolio():
         async with McpToolset(BROKER, allow={"get_portfolio", "list_proposals",
                                              "list_fills"}) as ts:
-            pf = await ts.call("get_portfolio")
-            pending = await ts.call("list_proposals", status="pending", limit=10)
-            fills = await ts.call("list_fills", limit=10)
+            pf = await ts.call("get_portfolio", account=user)
+            pending = await ts.call("list_proposals", account=user, status="pending",
+                                    limit=10)
+            fills = await ts.call("list_fills", account=user, limit=10)
         return {"portfolio": pf,
                 "pending": [{k: p[k] for k in ("symbol", "side", "quantity", "ref_price",
                                                "proposed_by")} for p in pending],
@@ -246,7 +247,8 @@ def build_tools(user: str, used: list[str], proposals: list[str]) -> list[Tool]:
            "reason": {"type": "string", "description": "1-2 sentences"}},
           ["symbol", "side", "quantity", "reason"])
     async def suggest_trade(symbol: str, side: str, quantity: int, reason: str):
-        p = await _mcp(BROKER, "propose_order", client_order_id=f"chat:{uuid.uuid4().hex}",
+        p = await _mcp(BROKER, "propose_order", account=user,
+                       client_order_id=f"chat:{user}:{uuid.uuid4().hex}",
                        symbol=symbol.upper(), side=side, quantity=int(quantity),
                        rationale=f"Suggested in chat: {reason}"[:1000],
                        brief={"source": "advisor chat", "thesis": reason[:500]})
@@ -329,6 +331,8 @@ async def user_watchlist(user: str) -> list[str]:
 
 
 async def chat(payload: dict, emit=None) -> dict:
+    # The account of the signed-in user, vouched for by the dashboard (the only caller
+    # allowed agent:call here). Every account tool below is bound to it.
     user = str(payload.get("user") or "operator")[:40].lower()
     history, text = _history(payload.get("messages") or [])
     used: list[str] = []

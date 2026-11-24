@@ -2,7 +2,7 @@
 -- (re)set their passwords from the environment. Rotating a password = change .env,
 -- rerun `docker compose run --rm migrate`, restart the service.
 SELECT format('CREATE ROLE %I LOGIN', r)
-FROM (VALUES ('gateway'), ('orchestrator'), ('market_data'), ('memory'), ('broker')) AS v(r)
+FROM (VALUES ('gateway'), ('orchestrator'), ('market_data'), ('memory'), ('broker'), ('dashboard')) AS v(r)
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r)
 \gexec
 
@@ -11,3 +11,4 @@ ALTER ROLE orchestrator PASSWORD :'orchestrator_pw';
 ALTER ROLE market_data PASSWORD :'market_data_pw';
 ALTER ROLE memory PASSWORD :'memory_pw';
 ALTER ROLE broker PASSWORD :'broker_pw';
+ALTER ROLE dashboard PASSWORD :'dashboard_pw';

@@ -42,9 +42,11 @@ advisor-agent = ["memory:read"]
 operator = ["memory:read"]
 
 [broker]
-portfolio-agent = ["broker:read", "broker:propose"]   # can propose, never execute
+portfolio-agent = ["broker:read", "broker:propose",  # can propose, never execute
+                   "accounts:list"]                  # to whom: who follows or holds the stock
 dashboard = ["broker:read", "broker:decide", "broker:trade", "audit:read",  # the human's hand
-             "watchlist:read", "watchlist:write", "alerts:read", "alerts:write"]
+             "watchlist:read", "watchlist:write", "alerts:read", "alerts:write",
+             "accounts:open"]                       # a demo account at sign-up
 advisor-agent = ["broker:read", "broker:propose",  # suggests; you approve
                  "watchlist:read", "alerts:read"]  # sees your list and alerts; changes neither
 scheduler = ["watchlist:all", "alerts:check"]      # what to research daily; runs the alert checks

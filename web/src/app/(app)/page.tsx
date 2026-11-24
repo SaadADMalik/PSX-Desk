@@ -52,7 +52,7 @@ export default function Today() {
     <div className="space-y-8">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">{greet}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{greet}{data.user ? `, ${data.user.split(" ")[0]}` : ""}</h1>
           <p className="text-sm text-muted-foreground">
             What the research desk thinks about your watchlist, and what needs your decision.</p>
         </div>

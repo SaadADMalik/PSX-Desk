@@ -25,7 +25,7 @@ brokerage. Output is research, not licensed financial advice.
 | **Researches your watchlist daily** | Each user keeps their own watchlist: star any stock to follow it. After the market closes, specialist agents analyse every followed stock from three angles: price trend, valuation and company announcements. A bull and a bear argue the case, and a head-of-research agent writes the brief. Any stock can be researched on demand. |
 | **Shows its reasoning** | Every brief shows the stance and confidence, key points and risks, both sides of the debate, what each analyst found, and how the desk reached its decision. Every number in it has been checked against the data. |
 | **Alerts you when a stock falls** | Set an alert on any stock: a percent fall, or for a stock you hold, rupees lost from your average cost. Give it a number of days, or leave it open until you cancel. It fires once when the price crosses your line, re-arms only after a real recovery, and asks the desk for fresh research on that stock. |
-| **Proposes, never acts** | When the desk feels strongly, it proposes a sized demo trade. Nothing executes until you approve it. At approval the broker re-prices the trade and re-checks every limit. |
+| **Proposes, never acts** | When the desk feels strongly, it proposes a demo trade to everyone who follows or holds the stock, sized for each account's own cash and holdings (the AI decides once per stock; code does the sizing). Nothing executes until you approve it. At approval the broker re-prices the trade and re-checks every limit. |
 | **Advises from official sources** | The advisor reads your account, your watchlist and alerts, the desk's research, live prices and announcements, and searches the web **only** on official sites: PSX, Pakistani regulators (SBP, SECP and others) and the companies' own domains. It cites what it read. |
 | **Keeps a tamper-evident record** | Every proposal, approval and fill goes into a hash-chained audit log that the app verifies continuously. |
 
@@ -77,7 +77,7 @@ model chooses the words, and code owns the facts and the decisions.
                                  ┌───────────────── web app (Next.js) ─────────────────┐
                                  │  live prices · search · approvals · advisor chat    │
                                  └──────────────────────────┬──────────────────────────┘
-                                                            │ session + CSRF guard
+                                                            │ JWT session + CSRF guard
                                                  ┌──────────▼──────────┐
        scheduler ── Redis Streams ──►            │      app API        │  only holder of
        (after close)                             │     (dashboard)     │  broker:decide
@@ -192,6 +192,14 @@ never approve or execute anything.
 - **Separation of duties.** The portfolio agent can propose but not approve. Only the
   app's API, acting for a signed-in human, holds `broker:decide`. Proposer and approver
   are recorded as different identities.
+- **Accounts kept apart.** Every user has their own demo account, watchlist and alerts.
+  The app's API takes the account from the user's signed token, never from the request,
+  and the broker filters every query by it: another user's proposal id is simply "not
+  found", and can't be approved, read or spent against.
+- **Sign-in.** Passwords hashed with argon2id. A 15-minute JWT access token, and a
+  refresh token that is stored only as a hash and replaced on every use; if a used one
+  comes back, it was copied, and that sign-in is revoked on every device. Sign-up and
+  sign-in are rate-limited.
 - **Prompt injection has nowhere to go.** The news agent reads untrusted company text,
   but it can't read prices or reach the broker. The worst a hijacked agent can do is
   add a pending proposal for a human to reject.
@@ -200,8 +208,8 @@ never approve or execute anything.
   chain continuously.
 - **Least-privilege data access.** Each service has its own Postgres role and can
   append to the tables it owns but not rewrite history.
-- **Hardened web surface.** Signed, HTTP-only, SameSite=strict session cookies; a CSRF
-  header on every write; the LLM key held by the gateway alone.
+- **Hardened web surface.** HTTP-only, SameSite=strict cookies that page scripts can't
+  read; a CSRF header on every write; the LLM key held by the gateway alone.
 - **13 security drills** ([`scripts/security_drills.py`](scripts/security_drills.py))
   run against the live stack in CI and check that each forbidden call really is refused.
 
@@ -238,8 +246,10 @@ uv run desk-keygen           # one Ed25519 key pair per service, into .keys/ (gi
 docker compose up -d --build
 ```
 
-Open **http://127.0.0.1:8700** and sign in as `operator` (or `DASHBOARD_USER`) with
-`DASHBOARD_PASSWORD` from `.env`.
+Open **http://127.0.0.1:8700** and create an account, or sign in to the operator
+account as `operator@psx-desk.local` (or `OPERATOR_EMAIL`) with `DASHBOARD_PASSWORD`
+from `.env`. Each account starts with Rs 1,000,000 of demo money. Set
+`SIGNUP_ENABLED=0` to close sign-up, and `COOKIE_SECURE=1` when serving over HTTPS.
 
 From the terminal:
 
@@ -261,7 +271,7 @@ cd web && npm run lint && npm run typecheck && npm run build && npx playwright t
 
 | File | Controls |
 |---|---|
-| `.env` | LLM API key, database passwords, app password and session secret (never committed) |
+| `.env` | LLM API key, database passwords, the operator's password and the token signing secret (never committed) |
 | [`config/access.toml`](config/access.toml) | Who may call what, for every service |
 | [`config/official_sources.toml`](config/official_sources.toml) | The only domains the advisor may search or read (regulators, plus each company's site) |
 | `WATCHLIST` in `docker-compose.yml` | The starting watchlist for a new account; after that, each user edits their own in the app |

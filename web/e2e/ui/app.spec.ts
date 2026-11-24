@@ -5,19 +5,47 @@ test.describe("sign in", () => {
   test("a wrong password shows the error and stays on the page", async ({ page }) => {
     await mockApi(page, { signedIn: false })
     await page.goto("/login")
+    await page.getByLabel("Email").fill("ayesha@example.com")
     await page.getByLabel("Password").fill("nope")
-    await page.getByRole("button", { name: /sign in/i }).click()
-    await expect(page.getByText("wrong user or password")).toBeVisible()
+    await page.getByRole("button", { name: /^sign in$/i }).click()
+    await expect(page.getByText("Wrong email or password")).toBeVisible()
     await expect(page).toHaveURL(/\/login$/)
   })
 
-  test("the right password opens Today", async ({ page }) => {
-    await mockApi(page)
+  test("the right password opens Today, greeting the user", async ({ page }) => {
+    const calls = await mockApi(page)
     await page.goto("/login")
+    await page.getByLabel("Email").fill("ayesha@example.com")
     await page.getByLabel("Password").fill("test-password")
-    await page.getByRole("button", { name: /sign in/i }).click()
+    await page.getByRole("button", { name: /^sign in$/i }).click()
     await expect(page).toHaveURL(/\/$/)
     await expect(page.getByText("Watchlist").first()).toBeVisible()
+    expect(calls.find((c) => c.url === "/api/auth/login")?.body)
+      .toEqual({ email: "ayesha@example.com", password: "test-password" })
+  })
+
+  test("a new user creates an account, and a taken email is explained", async ({ page }) => {
+    const calls = await mockApi(page)
+    await page.goto("/login")
+    await page.getByRole("tab", { name: "Create account" }).click()
+    await page.getByLabel("Name").fill("Bilal Ahmed")
+    await page.getByLabel("Email").fill("taken@example.com")
+    await page.getByLabel("Password").fill("long enough pw")
+    await page.getByRole("button", { name: "Create account" }).last().click()
+    await expect(page.getByText(/already exists/)).toBeVisible()
+    await page.getByLabel("Email").fill("bilal@example.com")
+    await page.getByRole("button", { name: "Create account" }).last().click()
+    await expect(page).toHaveURL(/\/$/)
+    expect(calls.filter((c) => c.url === "/api/auth/signup").at(-1)?.body)
+      .toEqual({ name: "Bilal Ahmed", email: "bilal@example.com", password: "long enough pw" })
+  })
+
+  test("an expired access token is refreshed without leaving the page", async ({ page }) => {
+    const calls = await mockApi(page, { expiredOnce: true })
+    await page.goto("/portfolio")
+    await expect(page.getByText("Holdings").first()).toBeVisible()
+    await expect(page).toHaveURL(/\/portfolio$/)
+    expect(calls.filter((c) => c.url === "/api/auth/refresh")).toHaveLength(1)
   })
 
   test("a signed-out visitor is sent to sign in", async ({ page }) => {

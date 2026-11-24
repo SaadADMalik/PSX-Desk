@@ -30,6 +30,7 @@ services:
       MARKET_DATA_DB_PASSWORD: ${MARKET_DATA_DB_PASSWORD:?set MARKET_DATA_DB_PASSWORD in .env}
       MEMORY_DB_PASSWORD: ${MEMORY_DB_PASSWORD:?set MEMORY_DB_PASSWORD in .env}
       BROKER_DB_PASSWORD: ${BROKER_DB_PASSWORD:?set BROKER_DB_PASSWORD in .env}
+      DASHBOARD_DB_PASSWORD: ${DASHBOARD_DB_PASSWORD:?set DASHBOARD_DB_PASSWORD in .env}
     volumes:
       - ./db/migrate.sh:/migrate.sh:ro
       - ./db/migrations:/migrations:ro
@@ -350,7 +351,7 @@ services:
       official-web: { condition: service_healthy }
     healthcheck: *tcp-health
 
-  dashboard: # the app's API: sessions, live event stream. Only holder of broker:decide.
+  dashboard: # the app's API: sign-up, JWT sessions, live event stream. Only holder of broker:decide.
     build: { context: ., args: { PACKAGE: dashboard } }
     command: ["dashboard"]
     environment:
@@ -361,7 +362,10 @@ services:
       ADVISOR_URL: http://advisor-agent:8000
       REDIS_URL: redis://redis:6379/0
       WATCHLIST: *watchlist # a new user's starting watchlist
-      DASHBOARD_USER: ${DASHBOARD_USER:-operator}
+      DATABASE_URL: postgresql://dashboard:${DASHBOARD_DB_PASSWORD}@postgres:5432/psx
+      OPERATOR_EMAIL: ${OPERATOR_EMAIL:-operator@psx-desk.local}
+      SIGNUP_ENABLED: ${SIGNUP_ENABLED:-1}
+      COOKIE_SECURE: ${COOKIE_SECURE:-0} # 1 behind HTTPS
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?set DASHBOARD_PASSWORD in .env}
       DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:?set DASHBOARD_SESSION_SECRET in .env}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318

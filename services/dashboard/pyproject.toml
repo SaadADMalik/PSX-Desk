@@ -1,10 +1,13 @@
 [project]
 name = "dashboard"
 version = "0.1.0"
-description = "Approvals dashboard: briefs, pending paper trades, portfolio, audit log"
+description = "The app's API: sign-up and JWT sessions, briefs, approvals, live events"
 requires-python = ">=3.13"
 dependencies = [
     "agentkit",
+    "argon2-cffi>=23.1",
+    "asyncpg>=0.30",
+    "pyjwt>=2.10",
     "fastapi>=0.115",
     "redis>=5.2",
     "contracts",
