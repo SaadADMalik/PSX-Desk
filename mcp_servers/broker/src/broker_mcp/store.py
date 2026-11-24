@@ -12,8 +12,19 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import asyncpg
-from contracts import Check, Decision, Fill, OrderSide, Portfolio, Proposal, ProposalStatus
+from contracts import (
+    AlertEvent,
+    AlertRule,
+    Check,
+    Decision,
+    Fill,
+    OrderSide,
+    Portfolio,
+    Proposal,
+    ProposalStatus,
+)
 
+from broker_mcp.alerts import reading, verdict
 from broker_mcp.policy import (
     BrokerPolicy,
     build_portfolio,
@@ -28,8 +39,35 @@ _COLS = ("id, client_order_id, run_id, proposed_by, symbol, side, quantity, ref_
          "decision_note, created_at, expires_at")
 
 
+_ALERT_COLS = ("id, account, symbol, kind, threshold, ref_price, ref_basis, starts_at, ends_at, "
+               "state, status, last_price, last_checked_at, times_triggered, created_by, "
+               "created_at")
+_EVENT_COLS = "id, rule_id, account, symbol, kind, price, drop_pct, loss_pkr, at"
+MAX_ACTIVE_ALERTS = 50
+MAX_WATCHLIST = 60
+
+
 def _iso(v: Any) -> str | None:
     return v.isoformat() if isinstance(v, datetime) else v
+
+
+def _num(v: Any) -> float | None:
+    return None if v is None else float(v)
+
+
+def _alert(row: asyncpg.Record) -> AlertRule:
+    d = dict(row)
+    return AlertRule(**{**d, "id": str(d["id"]), "threshold": float(d["threshold"]),
+                        "ref_price": float(d["ref_price"]), "last_price": _num(d["last_price"]),
+                        **{k: _iso(d[k]) for k in ("starts_at", "ends_at", "last_checked_at",
+                                                   "created_at")}})
+
+
+def _event(row: asyncpg.Record) -> AlertEvent:
+    d = dict(row)
+    return AlertEvent(**{**d, "rule_id": str(d["rule_id"]), "price": float(d["price"]),
+                         "drop_pct": float(d["drop_pct"]), "loss_pkr": _num(d["loss_pkr"]),
+                         "at": d["at"].isoformat()})
 
 
 def _proposal(row: asyncpg.Record) -> Proposal:
@@ -210,3 +248,161 @@ class BrokerStore:
             return Decision(proposal=closed, fill=Fill(
                 proposal_id=pid, symbol=p.symbol, side=p.side, quantity=p.quantity,
                 price=price, fees=fees, filled_at=filled_at.isoformat()))
+
+    # ------------------------------------------------------------ watchlists
+
+    async def watchlist(self, account: str) -> list[str]:
+        rows = await self.pool.fetch(
+            "SELECT symbol FROM watchlists WHERE account = $1 ORDER BY seq", account)
+        return [r["symbol"] for r in rows]
+
+    async def watched_symbols(self) -> list[str]:
+        """Every symbol on anyone's watchlist, once: research is shared per stock."""
+        rows = await self.pool.fetch("SELECT DISTINCT symbol FROM watchlists ORDER BY symbol")
+        return [r["symbol"] for r in rows]
+
+    async def init_watchlist(self, account: str, symbols: list[str]) -> bool:
+        """Give a new account its starting list, once. False if it was set up before, so
+        a user who empties their list keeps it empty."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            new = await conn.fetchval(
+                "INSERT INTO watchlist_accounts (account) VALUES ($1) "
+                "ON CONFLICT DO NOTHING RETURNING true", account)
+            if not new:
+                return False
+            await conn.executemany(
+                "INSERT INTO watchlists (account, symbol) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                [(account, s) for s in symbols[:MAX_WATCHLIST]])
+            return True
+
+    async def watch(self, account: str, symbol: str) -> list[str]:
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("INSERT INTO watchlist_accounts (account) VALUES ($1) "
+                               "ON CONFLICT DO NOTHING", account)
+            # One writer per account at a time, so the size limit holds.
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext('watchlist:' || $1))",
+                               account)
+            n = await conn.fetchval("SELECT count(*) FROM watchlists WHERE account = $1", account)
+            if n >= MAX_WATCHLIST:
+                raise ValueError(f"a watchlist holds at most {MAX_WATCHLIST} stocks")
+            await conn.execute("INSERT INTO watchlists (account, symbol) VALUES ($1, $2) "
+                               "ON CONFLICT DO NOTHING", account, symbol)
+        return await self.watchlist(account)
+
+    async def unwatch(self, account: str, symbol: str) -> list[str]:
+        await self.pool.execute("DELETE FROM watchlists WHERE account = $1 AND symbol = $2",
+                                account, symbol)
+        return await self.watchlist(account)
+
+    # ------------------------------------------------------------ alerts
+
+    async def alerts(self, account: str, active_only: bool = False) -> list[AlertRule]:
+        rows = await self.pool.fetch(
+            f"SELECT {_ALERT_COLS} FROM alert_rules WHERE account = $1 "
+            "AND (NOT $2 OR status = 'active') ORDER BY created_at DESC LIMIT 200",
+            account, active_only)
+        return [_alert(r) for r in rows]
+
+    async def alert_events(self, account: str, limit: int = 50) -> list[AlertEvent]:
+        rows = await self.pool.fetch(
+            f"SELECT {_EVENT_COLS} FROM alert_events WHERE account = $1 "
+            "ORDER BY id DESC LIMIT $2", account, limit)
+        return [_event(r) for r in rows]
+
+    async def create_alert(self, *, account: str, symbol: str, kind: str, threshold: float,
+                           ref_price: float, ref_basis: str, ends_at: datetime | None,
+                           created_by: str) -> AlertRule:
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext('alerts:' || $1))",
+                               account)
+            n = await conn.fetchval("SELECT count(*) FROM alert_rules "
+                                    "WHERE account = $1 AND status = 'active'", account)
+            if n >= MAX_ACTIVE_ALERTS:
+                raise ValueError(f"at most {MAX_ACTIVE_ALERTS} active alerts per account")
+            row = await conn.fetchrow(
+                f"INSERT INTO alert_rules (account, symbol, kind, threshold, ref_price, "
+                f"ref_basis, ends_at, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) "
+                f"RETURNING {_ALERT_COLS}",
+                account, symbol, kind, threshold, ref_price, ref_basis, ends_at, created_by)
+            rule = _alert(row)
+            await audit(conn, created_by, "alert.created", f"alert:{rule.id}",
+                        {"account": account, "symbol": symbol, "kind": kind,
+                         "threshold": threshold, "ref_price": ref_price,
+                         "ends_at": rule.ends_at})
+            return rule
+
+    async def cancel_alert(self, account: str, alert_id: str, actor: str) -> AlertRule | None:
+        """Cancel one of this account's active alerts. None if the account has no such
+        alert (another account's id is treated as unknown)."""
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                f"UPDATE alert_rules SET status = 'cancelled' WHERE id = $1 AND account = $2 "
+                f"AND status = 'active' RETURNING {_ALERT_COLS}", uuid.UUID(alert_id), account)
+            if row is not None:
+                await audit(conn, actor, "alert.cancelled", f"alert:{alert_id}", {})
+                return _alert(row)
+            row = await conn.fetchrow(f"SELECT {_ALERT_COLS} FROM alert_rules "
+                                      "WHERE id = $1 AND account = $2",
+                                      uuid.UUID(alert_id), account)
+            return _alert(row) if row else None
+
+    async def active_alert_symbols(self, now: datetime | None = None) -> list[str]:
+        rows = await self.pool.fetch(
+            "SELECT DISTINCT symbol FROM alert_rules WHERE status = 'active' "
+            "AND starts_at <= $1", now or datetime.now(UTC))
+        return [r["symbol"] for r in rows]
+
+    async def check_alerts(self, prices: dict[str, float | None], held: dict[str, int],
+                           actor: str, now: datetime | None = None) -> list[AlertEvent]:
+        """One pass over every active rule. Each rule is judged and moved in its own
+        transaction under a row lock, so two checkers at once cannot both fire the same
+        rule. Returns the events this pass created (triggers and re-arms)."""
+        now = now or datetime.now(UTC)
+        ids = await self.pool.fetch(
+            "SELECT id FROM alert_rules WHERE status = 'active' AND starts_at <= $1", now)
+        out: list[AlertEvent] = []
+        for (rid,) in ids:
+            async with self.pool.acquire() as conn, conn.transaction():
+                row = await conn.fetchrow(
+                    f"SELECT {_ALERT_COLS} FROM alert_rules WHERE id = $1 AND status = 'active' "
+                    "FOR UPDATE SKIP LOCKED", rid)
+                if row is None:
+                    continue  # another checker holds it, or it has just ended
+                event = await self._check_one(conn, _alert(row), row["ends_at"], prices, held,
+                                              actor, now)
+                if event:
+                    out.append(event)
+        return out
+
+    async def _check_one(self, conn, rule: AlertRule, ends_at: datetime | None,
+                         prices: dict[str, float | None], held: dict[str, int], actor: str,
+                         now: datetime) -> AlertEvent | None:
+        price = prices.get(rule.symbol)
+        r = reading(rule.ref_price, price, held.get(rule.symbol, 0)) if price else None
+        v = verdict(kind=rule.kind.value, threshold=rule.threshold, state=rule.state,
+                    ends_at=ends_at, now=now, reading=r)
+        rid = uuid.UUID(rule.id)
+        if v in ("expire", "end"):
+            status = "expired" if v == "expire" else "ended"
+            await conn.execute("UPDATE alert_rules SET status = $2 WHERE id = $1", rid, status)
+            await audit(conn, actor, f"alert.{status}", f"alert:{rule.id}",
+                        {"reason": "its window passed" if v == "expire" else "position sold"})
+            return None
+        if price is not None:
+            await conn.execute("UPDATE alert_rules SET last_price = $2, last_checked_at = $3 "
+                               "WHERE id = $1", rid, price, now)
+        if v == "hold" or r is None:
+            return None
+        fired = v == "trigger"
+        await conn.execute(
+            "UPDATE alert_rules SET state = $2, times_triggered = times_triggered + $3 "
+            "WHERE id = $1", rid, "triggered" if fired else "armed", 1 if fired else 0)
+        kind = "triggered" if fired else "rearmed"
+        ev = await conn.fetchrow(
+            "INSERT INTO alert_events (rule_id, account, symbol, kind, price, drop_pct, "
+            f"loss_pkr, at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING {_EVENT_COLS}",
+            rid, rule.account, rule.symbol, kind, price, r.drop_pct, r.loss_pkr, now)
+        await audit(conn, actor, f"alert.{kind}", f"alert:{rule.id}",
+                    {"account": rule.account, "symbol": rule.symbol, "price": price,
+                     "drop_pct": r.drop_pct, "loss_pkr": r.loss_pkr})
+        return _event(ev)

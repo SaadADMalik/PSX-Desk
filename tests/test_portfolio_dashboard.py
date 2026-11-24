@@ -60,7 +60,7 @@ def dash(monkeypatch):
 
     async def fake_broker(tool, **args):
         calls.append((tool, args))
-        if tool == "list_proposals":
+        if tool in ("list_proposals", "get_watchlist"):
             return []
         if tool == "decide":
             return {"proposal": {"symbol": "LUCK", "status": "rejected"}, "reason": None}

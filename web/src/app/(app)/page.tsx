@@ -2,17 +2,19 @@
 
 import Link from "next/link"
 import useSWR from "swr"
-import { ArrowRight, Bot, Inbox, Wallet, TrendingUp, Landmark } from "lucide-react"
+import { ArrowRight, BellRing, Bot, Inbox, Plus, Wallet, TrendingUp, Landmark } from "lucide-react"
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Change, LivePrice, RiskBadge, Sparkline, StanceBadge } from "@/components/desk"
+import { AlertList } from "@/components/price-alerts"
 import { ProposalCard } from "@/components/proposal-card"
 import { ResearchButton } from "@/components/research-button"
 import { TradeDialog } from "@/components/trade-dialog"
+import { WatchButton } from "@/components/watch-button"
 import { useLive } from "@/lib/live"
-import { ago, money, pct, tone } from "@/lib/format"
+import { ago, money, pct, price, tone } from "@/lib/format"
 import type { Overview } from "@/lib/types"
 
 function Stat({ icon: Icon, label, value, sub, subTone }: {
@@ -77,16 +79,42 @@ export default function Today() {
         </section>
       )}
 
+      {data.alert_events.some((e) => e.kind === "triggered") && (
+        <section className="space-y-3">
+          <h2 className="text-sm font-medium text-muted-foreground">Price alerts that fired</h2>
+          <div className="grid gap-2 lg:grid-cols-2">
+            {data.alert_events.filter((e) => e.kind === "triggered").slice(0, 4).map((e) => (
+              <Link key={e.id} href={`/stocks/${e.symbol}`}
+                    className="flex items-center gap-3 rounded-xl border border-loss/30 bg-loss/5 p-3 text-sm hover:bg-loss/10">
+                <BellRing className="size-4 shrink-0 text-loss" />
+                <div className="min-w-0">
+                  <div><span className="font-semibold">{e.symbol}</span> fell {e.drop_pct.toFixed(1)}% to {price(e.price)}
+                    {e.loss_pkr != null && <> · {money(e.loss_pkr)} down on your shares</>}</div>
+                  <div className="text-xs text-muted-foreground">{ago(e.at)} · fresh research was requested</div>
+                </div>
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
+
       <Card>
         <CardHeader>
-          <CardTitle>Watchlist</CardTitle>
-          <CardDescription>Live prices, and the research desk&apos;s latest call on each stock.
-            Five AI agents research a stock, argue both sides, and every number is checked.</CardDescription>
-          <CardAction className="hidden text-xs text-muted-foreground sm:block">
-            {data.quotes_at ? `prices ${ago(quotes?.fetched_at ?? data.quotes_at)}` : ""}
+          <CardTitle>Your watchlist</CardTitle>
+          <CardDescription>Live prices, and the research desk&apos;s latest call on each stock you follow.
+            The desk researches every stock on it after each trading day.</CardDescription>
+          <CardAction className="flex items-center gap-3">
+            <span className="hidden text-xs text-muted-foreground sm:block">
+              {data.quotes_at ? `prices ${ago(quotes?.fetched_at ?? data.quotes_at)}` : ""}</span>
+            <Button size="sm" variant="outline" render={<Link href="/stocks" />}><Plus />Add stocks</Button>
           </CardAction>
         </CardHeader>
         <CardContent className="px-0">
+          {data.watchlist.length === 0 ? (
+            <p className="px-6 py-8 text-center text-sm text-muted-foreground">
+              Your watchlist is empty. Open <Link href="/stocks" className="text-primary hover:underline">Stocks</Link> and
+              press the star next to any stock to follow it.</p>
+          ) : (
           <Table>
             <TableHeader>
               <TableRow>
@@ -124,6 +152,7 @@ export default function Today() {
                         <ResearchButton symbol={r.symbol} variant="ghost" />
                         <TradeDialog symbol={r.symbol} held={held} cash={pf.cash}
                           trigger={<Button size="sm" variant="outline">Trade</Button>} />
+                        <WatchButton symbol={r.symbol} watched iconOnly />
                         <Button size="icon-sm" variant="ghost" render={<Link href={`/stocks/${r.symbol}`} />}>
                           <ArrowRight /></Button>
                       </div>
@@ -133,7 +162,17 @@ export default function Today() {
               })}
             </TableBody>
           </Table>
+          )}
         </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Price alerts</CardTitle>
+          <CardDescription>Each alert tells you once when a stock falls past your line, then waits
+            for it to recover before it can alert again. Set one from any stock&apos;s page.</CardDescription>
+        </CardHeader>
+        <CardContent><AlertList alerts={data.alerts} showSymbol /></CardContent>
       </Card>
 
       <Card size="sm" className="bg-muted/40">

@@ -1,4 +1,9 @@
-"""Scheduler: after each PSX trading day, request briefs for the watchlist.
+"""Scheduler: the desk's clock.
+
+  * After each PSX trading day it requests a brief for every stock on anyone's
+    watchlist, once per stock: ten users watching LUCK means one LUCK brief.
+  * While the market is open (and once after it closes) it asks the broker to check
+    every price alert. Each alert that fires gets a fresh brief on that stock.
 
 It publishes events and knows nothing about who handles them. That decoupling is
 the point of the bus: the orchestrator can be down, slow, or replaced, and the
@@ -21,6 +26,7 @@ import os
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+from agentkit.mcp_tools import McpToolset
 from agentkit.tracing import setup_tracing, shutdown_tracing
 from contracts import Lane
 from contracts.events import MARKET, REQUESTS, BriefRequested, Event
@@ -33,9 +39,58 @@ PKT = ZoneInfo("Asia/Karachi")
 _tracer = trace.get_tracer("scheduler")
 
 
-def watchlist() -> list[str]:
+BROKER = os.getenv("BROKER_MCP_URL", "http://127.0.0.1:8600/mcp")
+ALERT_CHECK_S = float(os.getenv("ALERT_CHECK_S", "900"))
+
+
+def default_watchlist() -> list[str]:
     raw = os.getenv("WATCHLIST", "LUCK,ENGRO,HBL,OGDC,PPL,MCB,FFC,SYS,HUBC,MEBL")
     return [s.strip().upper() for s in raw.split(",") if s.strip()]
+
+
+async def watchlist() -> list[str]:
+    """Every stock on anyone's watchlist (the broker keeps them). If the broker cannot
+    be reached, fall back to the default list rather than skip the day's research."""
+    try:
+        async with McpToolset(BROKER, allow={"watched_symbols"}) as ts:
+            symbols = await ts.call("watched_symbols")
+    except Exception as e:  # noqa: BLE001
+        log.warning("watchlists unavailable (%s); using the default list", e)
+        return default_watchlist()
+    return symbols
+
+
+def market_hours(now: datetime) -> bool:
+    """Weekdays from the 09:30 open until 16:00, half an hour after the 15:30 close,
+    so the closing prices get one last check."""
+    t = now.astimezone(PKT)
+    return t.weekday() < 5 and time(9, 30) <= t.time() < time(16, 0)
+
+
+async def check_alerts(bus: EventBus) -> int:
+    """One alert pass. Each alert that fires requests a fresh brief on its stock,
+    keyed by the alert event, so a retry never asks twice."""
+    async with McpToolset(BROKER, allow={"check_alerts"}) as ts:
+        events = await ts.call("check_alerts")
+    fired = [e for e in events if e["kind"] == "triggered"]
+    for e in fired:
+        payload = BriefRequested(symbol=e["symbol"], idempotency_key=f"alert:{e['id']}",
+                                 lane=Lane.interactive)
+        await bus.publish(REQUESTS, Event(type="brief.requested", source="scheduler",
+                                          payload=payload.model_dump(mode="json")))
+    if events:
+        log.info("alerts: %d fired, %d re-armed", len(fired), len(events) - len(fired))
+    return len(fired)
+
+
+async def alert_loop(bus: EventBus) -> None:
+    while True:
+        if market_hours(datetime.now(PKT)):
+            try:
+                await check_alerts(bus)
+            except Exception as e:  # noqa: BLE001  the next pass retries
+                log.warning("alert check failed: %s", e)
+        await asyncio.sleep(ALERT_CHECK_S)
 
 
 def next_fire(now: datetime, at: time) -> datetime:
@@ -66,19 +121,23 @@ def _redis() -> Redis:
 
 
 async def loop() -> None:
-    at = time.fromisoformat(os.getenv("SCHEDULE_AT", "16:15"))  # PSX closes 15:30 PKT
     redis = _redis()
     bus = EventBus(redis)
+    await asyncio.gather(daily_loop(bus), alert_loop(bus))
+
+
+async def daily_loop(bus: EventBus) -> None:
+    at = time.fromisoformat(os.getenv("SCHEDULE_AT", "16:15"))  # PSX closes 15:30 PKT
     while True:
         when = next_fire(datetime.now(PKT), at)
         log.info("next fire at %s", when.isoformat())
         await asyncio.sleep(max(0.0, (when - datetime.now(PKT)).total_seconds()))
         try:
-            await fire(bus, when.date(), watchlist())
+            await fire(bus, when.date(), await watchlist())
         except Exception:
             log.exception("fire failed; retrying in 60s")
             await asyncio.sleep(60)
-            await fire(bus, when.date(), watchlist())
+            await fire(bus, when.date(), await watchlist())
 
 
 def run() -> None:
@@ -94,7 +153,7 @@ def cli() -> None:
     p.add_argument("--symbols", help="comma-separated; default WATCHLIST")
     args = p.parse_args()
     symbols = ([s.strip().upper() for s in args.symbols.split(",")] if args.symbols
-               else watchlist())
+               else asyncio.run(watchlist()))
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     setup_tracing("scheduler")
 

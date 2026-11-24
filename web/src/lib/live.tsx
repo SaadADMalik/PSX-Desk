@@ -40,6 +40,18 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
           toast.error(`Research on ${d.symbol} failed`)
         }
         mutate((k) => typeof k === "string" && k.startsWith("/api/"))
+      } else if (msg.type === "alert") {
+        const d = msg.data
+        if (d.kind === "triggered") {
+          toast.warning(`${d.symbol} fell ${Number(d.drop_pct).toFixed(1)}%`, {
+            description: `Now Rs ${Number(d.price).toFixed(2)}` +
+              (d.loss_pkr != null ? ` · Rs ${Math.round(d.loss_pkr).toLocaleString("en-PK")} down on your shares` : "") +
+              " · fresh research requested",
+            duration: 15000,
+          })
+        }
+        mutate((k) => typeof k === "string" &&
+          (k.startsWith("/api/overview") || k.startsWith("/api/stocks") || k.startsWith("/api/alerts")))
       } else if (msg.type === "portfolio") {
         if (pending.current) window.clearTimeout(pending.current)
         pending.current = window.setTimeout(() =>

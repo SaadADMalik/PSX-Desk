@@ -52,13 +52,29 @@ test.describe("stocks", () => {
   test("Ctrl+K search opens a stock page with the desk's reasoning", async ({ page }) => {
     await mockApi(page)
     await page.goto("/")
-    await page.keyboard.press("Control+k")
+    // the shortcut is wired up once the page hydrates; retry until it focuses the box
+    await expect(async () => {
+      await page.keyboard.press("Control+k")
+      await expect(page.getByLabel("Search stocks")).toBeFocused({ timeout: 500 })
+    }).toPass()
     await page.keyboard.type("hbl")
     await page.keyboard.press("Enter")
     await expect(page).toHaveURL(/\/stocks\/HBL$/)
     await expect(page.getByText("The desk's view")).toBeVisible()
     await expect(page.getByText("How the desk decided")).toBeVisible()
   })
+})
+
+test("a price alert can be set on a stock, with no end date", async ({ page }) => {
+  const calls = await mockApi(page)
+  await page.goto("/stocks/HBL")
+  await page.getByRole("button", { name: "Set alert" }).click()
+  await page.getByLabel(/falls by/).fill("5")
+  await expect(page.getByText(/Alerts at about/)).toBeVisible()
+  await page.getByRole("dialog").getByRole("button", { name: "Set alert" }).click()
+  await expect(page.getByText("Alert set on HBL")).toBeVisible()
+  expect(calls.find((c) => c.url === "/api/alerts")?.body)
+    .toEqual({ symbol: "HBL", kind: "pct", threshold: 5, days: null })
 })
 
 test("Under the hood lists every agent, including unreachable ones", async ({ page }) => {

@@ -64,8 +64,13 @@ export async function streamPost(url: string, body: unknown,
 }
 
 export async function post<T>(url: string, body?: unknown): Promise<T> {
+  return send<T>("POST", url, body)
+}
+
+export async function send<T>(method: "POST" | "PUT" | "DELETE", url: string,
+                              body?: unknown): Promise<T> {
   const r = await fetch(url, {
-    method: "POST",
+    method,
     credentials: "same-origin",
     headers: { "Content-Type": "application/json", "X-Desk-Request": "1" },
     body: body === undefined ? undefined : JSON.stringify(body),

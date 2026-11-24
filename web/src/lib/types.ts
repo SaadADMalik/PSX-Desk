@@ -90,7 +90,38 @@ export interface Overview {
   watchlist: WatchRow[]
   portfolio: Portfolio
   pending: Proposal[]
+  alerts: AlertRule[]
+  alert_events: AlertEvent[]
   initial_capital: number
+}
+
+export interface AlertRule {
+  id: string
+  symbol: string
+  kind: "pct" | "pkr"
+  threshold: number
+  ref_price: number
+  ref_basis: "avg_cost" | "price_when_set"
+  starts_at: string
+  ends_at: string | null
+  state: "armed" | "triggered"
+  status: "active" | "expired" | "cancelled" | "ended"
+  last_price: number | null
+  last_checked_at: string | null
+  times_triggered: number
+  created_at: string
+}
+
+export interface AlertEvent {
+  id: number
+  rule_id: string
+  account: string
+  symbol: string
+  kind: "triggered" | "rearmed"
+  price: number
+  drop_pct: number
+  loss_pkr: number | null
+  at: string
 }
 
 export interface Claim {
@@ -136,6 +167,8 @@ export interface StockData {
   cash: number
   equity: number
   brief: FullBrief | null
+  watched: boolean
+  alerts: AlertRule[]
 }
 
 export interface CurvePoint {

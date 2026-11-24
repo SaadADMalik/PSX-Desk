@@ -22,19 +22,20 @@ brokerage. Output is research, not licensed financial advice.
 | | |
 |---|---|
 | **Covers the whole market** | All ~750 traded PSX securities, with live prices, day and 1-year change, P/E, dividend yield and traded value. Search any stock by ticker or company name from anywhere (`Ctrl+K`). |
-| **Researches your watchlist daily** | After the market closes, specialist agents analyse each watchlist stock from three angles: price trend, valuation and company announcements. A bull and a bear argue the case, and a head-of-research agent writes the brief. Any stock can be researched on demand. |
+| **Researches your watchlist daily** | Each user keeps their own watchlist: star any stock to follow it. After the market closes, specialist agents analyse every followed stock from three angles: price trend, valuation and company announcements. A bull and a bear argue the case, and a head-of-research agent writes the brief. Any stock can be researched on demand. |
 | **Shows its reasoning** | Every brief shows the stance and confidence, key points and risks, both sides of the debate, what each analyst found, and how the desk reached its decision. Every number in it has been checked against the data. |
+| **Alerts you when a stock falls** | Set an alert on any stock: a percent fall, or for a stock you hold, rupees lost from your average cost. Give it a number of days, or leave it open until you cancel. It fires once when the price crosses your line, re-arms only after a real recovery, and asks the desk for fresh research on that stock. |
 | **Proposes, never acts** | When the desk feels strongly, it proposes a sized demo trade. Nothing executes until you approve it. At approval the broker re-prices the trade and re-checks every limit. |
-| **Advises from official sources** | The advisor reads your account, the desk's research, live prices and announcements, and searches the web **only** on official sites: PSX, Pakistani regulators (SBP, SECP and others) and the companies' own domains. It cites what it read. |
+| **Advises from official sources** | The advisor reads your account, your watchlist and alerts, the desk's research, live prices and announcements, and searches the web **only** on official sites: PSX, Pakistani regulators (SBP, SECP and others) and the companies' own domains. It cites what it read. |
 | **Keeps a tamper-evident record** | Every proposal, approval and fill goes into a hash-chained audit log that the app verifies continuously. |
 
 ### The app
 
 | Screen | What it is for |
 |---|---|
-| **Today** | Account value, today's move, cash, trades awaiting approval, and your watchlist with live prices, 30-day sparklines and the desk's latest call |
-| **Stocks** | The whole market: search on every keystroke, sector filter, sortable columns, gainers, losers and most active |
-| **Stock page** | Price chart, the desk's view and how it was decided, the case for and against, each analyst's findings, your position, and Research and Trade buttons |
+| **Today** | Account value, today's move, cash, trades awaiting approval, your watchlist with live prices, 30-day sparklines and the desk's latest call, and your price alerts |
+| **Stocks** | The whole market: search on every keystroke, sector filter, sortable columns, gainers, losers and most active; star a stock to add it to your watchlist |
+| **Stock page** | Price chart, the desk's view and how it was decided, the case for and against, each analyst's findings, your position and its alerts, and Watch, Set alert, Research and Trade buttons |
 | **Advisor** | Chat that streams its answer, showing each step live (*Searched official sources…*, *Read meezanbank.com*, *Checked live prices*) |
 | **Demo account** | Value over time against the same money in the KSE-100, holdings, every fill with fees, every proposal and its outcome |
 | **Under the hood** | Every agent and its status, today's AI budget per model, and the audit chain's verification |
@@ -263,7 +264,8 @@ cd web && npm run lint && npm run typecheck && npm run build && npx playwright t
 | `.env` | LLM API key, database passwords, app password and session secret (never committed) |
 | [`config/access.toml`](config/access.toml) | Who may call what, for every service |
 | [`config/official_sources.toml`](config/official_sources.toml) | The only domains the advisor may search or read (regulators, plus each company's site) |
-| `WATCHLIST` in `docker-compose.yml` | The stocks researched automatically each trading day |
+| `WATCHLIST` in `docker-compose.yml` | The starting watchlist for a new account; after that, each user edits their own in the app |
+| `ALERT_CHECK_S` in `docker-compose.yml` | How often price alerts are checked during market hours (default 15 minutes) |
 
 ---
 

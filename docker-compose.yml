@@ -242,17 +242,26 @@ services:
 
   # ---- Slice 2: events --------------------------------------------------
 
-  scheduler:
+  scheduler: # the desk's clock: daily research for every watched stock, and price alerts
     build: { context: ., args: { PACKAGE: scheduler } }
     command: ["scheduler"]
     environment:
       REDIS_URL: redis://redis:6379/0
-      WATCHLIST: LUCK,ENGRO,HBL,OGDC,PPL,MCB,FFC,SYS,HUBC,MEBL
+      BROKER_MCP_URL: http://broker:8000/mcp
+      WATCHLIST: LUCK,ENGRO,HBL,OGDC,PPL,MCB,FFC,SYS,HUBC,MEBL # used if the broker is down
       SCHEDULE_AT: "16:15" # Pakistan time; PSX closes at 15:30
+      ALERT_CHECK_S: "900" # price alerts every 15 minutes while the market is open
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      SERVICE_NAME: scheduler
+      AUTH_REQUIRED: "1"
+      KEYS_DIR: /run/keys
+    volumes:
+      - ./.keys/public:/run/keys/public:ro
+      - ./.keys/private/scheduler.key:/run/keys/private/scheduler.key:ro
     restart: unless-stopped
     depends_on:
       redis: { condition: service_healthy }
+      broker: { condition: service_healthy }
 
   # ---- Slice 4: action and governance ------------------------------------
 
@@ -351,7 +360,7 @@ services:
       LLM_GATEWAY_URL: http://llm-gateway:8000
       ADVISOR_URL: http://advisor-agent:8000
       REDIS_URL: redis://redis:6379/0
-      WATCHLIST: *watchlist
+      WATCHLIST: *watchlist # a new user's starting watchlist
       DASHBOARD_USER: ${DASHBOARD_USER:-operator}
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?set DASHBOARD_PASSWORD in .env}
       DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:?set DASHBOARD_SESSION_SECRET in .env}

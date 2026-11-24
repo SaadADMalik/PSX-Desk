@@ -6,6 +6,15 @@ Tools and who may call them (config/access.toml):
     propose_order                                 broker:propose  portfolio agent
     decide                                        broker:decide   dashboard (a human) only
     audit_log, verify_audit                       audit:read      dashboard, operator
+    get_watchlist                                 watchlist:read  dashboard, advisor
+    watch, unwatch, init_watchlist                watchlist:write dashboard
+    watched_symbols (everyone's, once)            watchlist:all   scheduler
+    list_alerts, list_alert_events                alerts:read     dashboard, advisor
+    create_alert, cancel_alert                    alerts:write    dashboard
+    check_alerts                                  alerts:check    scheduler
+
+It is also the account service: each user's watchlist and price alerts live here,
+next to the positions the alerts watch.
 
 Separation of duties is the point. The agent that proposes a trade cannot approve
 it; the dashboard that approves cannot propose. Even a fully compromised agent
@@ -24,14 +33,14 @@ import os
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import uvicorn
 from agentkit.auth import McpGuard
 from agentkit.mcp_tools import McpToolset
 from agentkit.tracing import setup_tracing
-from contracts import Decision, Fill, OrderSide, Portfolio, Proposal
+from contracts import AlertEvent, AlertRule, Decision, Fill, OrderSide, Portfolio, Proposal
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
@@ -49,6 +58,23 @@ MAX_QUANTITY = 1_000_000
 
 READ = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True,
                        open_world_hint=False)
+WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True,
+                        open_world_hint=False)
+ACCOUNT_RE = re.compile(r"^[a-z0-9_.@\-]{1,40}$")
+
+
+def _account(account: str) -> str:
+    account = account.lower()
+    if not ACCOUNT_RE.match(account):
+        raise ToolError("invalid account")
+    return account
+
+
+def _symbol(symbol: str) -> str:
+    symbol = symbol.upper()
+    if not SYMBOL_RE.match(symbol):
+        raise ToolError("invalid symbol")
+    return symbol
 
 
 class AuditEntry(BaseModel):
@@ -247,6 +273,127 @@ def build_server(store: BrokerStore | None = None, quotes: Quotes | None = None,
                 f"{c.rule}: {c.detail}" for c in p.checks if not c.ok) or p.status.value)
         return await state["store"].decide(p.id, approve=True, actor=actor, note=note[:500],
                                            quote=quote, marks=m)
+
+    # ------------------------------------------------------------ watchlists
+    #
+    # `account` is the human the calling service vouches for (the dashboard for the
+    # signed-in user, the advisor for the user it is talking to), like `decided_by`.
+
+    @server.tool(annotations=READ)
+    async def get_watchlist(account: str) -> list[str]:
+        """The stocks this account follows, in the order they were added."""
+        guard.require("watchlist:read")
+        return await state["store"].watchlist(_account(account))
+
+    @server.tool(annotations=READ)
+    async def watched_symbols() -> list[str]:
+        """Every stock on anyone's watchlist, once. The daily research covers these."""
+        guard.require("watchlist:all")
+        return await state["store"].watched_symbols()
+
+    @server.tool(annotations=WRITE)
+    async def init_watchlist(account: str, symbols: list[str]) -> bool:
+        """Give a new account its starting watchlist. Does nothing if the account has
+        had a watchlist before (an emptied list stays empty)."""
+        guard.require("watchlist:write")
+        return await state["store"].init_watchlist(
+            _account(account), [_symbol(s) for s in symbols[:60]])
+
+    @server.tool(annotations=WRITE)
+    async def watch(account: str, symbol: str) -> list[str]:
+        """Add a stock to this account's watchlist. Returns the new list."""
+        guard.require("watchlist:write")
+        try:
+            return await state["store"].watch(_account(account), _symbol(symbol))
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+
+    @server.tool(annotations=WRITE)
+    async def unwatch(account: str, symbol: str) -> list[str]:
+        """Remove a stock from this account's watchlist. Returns the new list."""
+        guard.require("watchlist:write")
+        return await state["store"].unwatch(_account(account), _symbol(symbol))
+
+    # ------------------------------------------------------------ price alerts
+
+    @server.tool(annotations=READ)
+    async def list_alerts(account: str, active_only: bool = False) -> list[AlertRule]:
+        """This account's price alerts, newest first."""
+        guard.require("alerts:read")
+        return await state["store"].alerts(_account(account), active_only)
+
+    @server.tool(annotations=READ)
+    async def list_alert_events(account: str, limit: int = 50) -> list[AlertEvent]:
+        """When this account's alerts fired or re-armed, newest first."""
+        guard.require("alerts:read")
+        return await state["store"].alert_events(_account(account), max(1, min(limit, 200)))
+
+    @server.tool(annotations=WRITE)
+    async def create_alert(account: str, symbol: str, kind: str, threshold: float,
+                           created_by: str, days: int | None = None) -> AlertRule:
+        """Alert when a stock falls. kind "pct": the price falls `threshold` percent below
+        the reference. kind "pkr": the position loses `threshold` rupees (needs shares
+        held). The reference is your average cost if you hold the stock, else today's
+        price. `days`: watch for this many days from now; omit to watch until cancelled.
+        It fires once per fall and re-arms after the price recovers past 80% of it."""
+        caller = guard.require("alerts:write") or "unauthenticated"
+        account, symbol = _account(account), _symbol(symbol)
+        if not re.match(r"^[a-z0-9_.\-:]{1,60}$", created_by):
+            raise ToolError("invalid created_by")
+        if kind == "pct" and not 0.1 <= threshold <= 90:
+            raise ToolError("a percentage alert needs a threshold from 0.1 to 90")
+        if kind == "pkr" and not 1 <= threshold <= 1_000_000_000:
+            raise ToolError("a rupee alert needs a threshold from 1 to 1,000,000,000")
+        if kind not in ("pct", "pkr"):
+            raise ToolError('kind must be "pct" or "pkr"')
+        if days is not None and not 1 <= days <= 3650:
+            raise ToolError("days must be 1 to 3650, or omitted for no end")
+        pf = await state["store"].portfolio({})
+        pos = next((p for p in pf.positions if p.symbol == symbol), None)
+        if kind == "pkr" and pos is None:
+            raise ToolError(f"a rupee alert needs a position: you don't hold {symbol}")
+        if pos is not None:
+            ref, basis = pos.avg_cost, "avg_cost"
+        else:
+            ref, basis = await state["quotes"].price(symbol), "price_when_set"
+            if ref is None:
+                raise ToolError(f"no live quote for {symbol}; cannot set a reference price")
+        ends = datetime.now(UTC) + timedelta(days=days) if days else None
+        try:
+            return await state["store"].create_alert(
+                account=account, symbol=symbol, kind=kind, threshold=threshold, ref_price=ref,
+                ref_basis=basis, ends_at=ends,
+                created_by=f"{caller}:{created_by}")
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+
+    @server.tool(annotations=WRITE)
+    async def cancel_alert(account: str, alert_id: str, cancelled_by: str) -> AlertRule:
+        """Stop one of this account's alerts."""
+        caller = guard.require("alerts:write") or "unauthenticated"
+        if not UUID_RE.match(alert_id) or not re.match(r"^[a-z0-9_.\-]{1,40}$", cancelled_by):
+            raise ToolError("invalid alert id or cancelled_by")
+        rule = await state["store"].cancel_alert(
+            _account(account), alert_id, f"{caller}:{cancelled_by}")
+        if rule is None:
+            raise ToolError("no such alert")
+        return rule
+
+    @server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False,
+                                             idempotent_hint=False, open_world_hint=False))
+    async def check_alerts() -> list[AlertEvent]:
+        """Check every active alert against live prices once. Returns the alerts that
+        fired or re-armed in this pass. Stale prices are skipped, never judged."""
+        caller = guard.require("alerts:check") or "unauthenticated"
+        store = state["store"]
+        symbols = await store.active_alert_symbols()
+        if not symbols:
+            return []
+        quotes = state["quotes"]
+        batch = getattr(quotes, "prices", None)
+        prices = await batch(symbols) if batch else {s: await quotes.price(s) for s in symbols}
+        held = {p.symbol: p.quantity for p in (await store.portfolio({})).positions}
+        return await store.check_alerts(prices, held, actor=caller)
 
     @server.tool(annotations=READ)
     async def audit_log(limit: int = 50) -> list[AuditEntry]:
