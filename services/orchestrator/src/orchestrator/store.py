@@ -37,8 +37,8 @@ from contracts.events import Event
 # workflow versioning; Temporal has a whole API for it. We only ever add steps.
 SPECIALISTS = ["technical_analysis", "fundamental_analysis", "news_analysis"]
 DEBATE = ["bull_case", "bear_case"]
-STEPS = [*SPECIALISTS, *DEBATE, "judgement", "verification", "risk_gate", "remember",
-         "proposal"]
+STEPS = [*SPECIALISTS, *DEBATE, "judgement", "verification", "announcements", "risk_gate",
+         "remember", "proposal"]
 TERMINAL = {"succeeded", "failed"}
 
 

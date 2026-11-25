@@ -4,7 +4,8 @@
     fundamental├─► verify reports ─► bull ─┐
     news ──────┘    (code)          bear ──┴─► verify cases ─► judgement ⇄ verification
                                                 (code)                       (code)
-                                    ─► risk_gate (code) ─► remember ─► proposal ─► done
+                                    ─► announcements (data) ─► risk_gate (code)
+                                    ─► remember ─► proposal ─► done
                                                                       (only if actionable;
                                                                        a human decides)
 
@@ -217,6 +218,21 @@ async def brief_workflow(ctx: RunContext, desk: Desk, req: AnalysisRequest,
     verification = Verification.model_validate(verified["verification"])
 
     # ---- 4. risk gate (code), then memory (best effort)
+    # The gate's announcement rule must see the company's recent announcements even when
+    # the news agent failed: that is a data lookup, not analysis, so fetch it here. If
+    # it cannot be fetched either, the gate vetoes trading (it cannot rule out news).
+    async def announcements() -> dict:
+        have = next((ev for ev in evidence.values() if ev.kind == "news"), None)
+        if have is not None:
+            return {"source": "news agent", "evidence": None}
+        ev = await desk.announcements(req.symbol)
+        return {"source": "fetched by the gate", "evidence": ev.model_dump(mode="json")}
+
+    news = await ctx.step("announcements", announcements, optional=True)
+    if news and news.get("evidence"):
+        ev = Evidence.model_validate(news["evidence"])
+        evidence[ev.id] = ev
+
     async def gate() -> dict:
         b, risk = assess(brief, evidence, failures=failures, cases_missing=cases_missing,
                          verification=verification, policy=cfg.policy)

@@ -11,6 +11,8 @@ from agentkit.mcp_tools import McpToolError, McpToolset
 from broker_mcp.policy import BrokerPolicy, build_portfolio, failed, pre_trade_checks
 from broker_mcp.server import build_server
 from broker_mcp.store import BrokerStore
+
+A = "operator"
 from contracts import OrderSide, ProposalStatus
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from mcp.client.streamable_http import streamable_http_client
@@ -65,16 +67,19 @@ async def broker(pg_url):
     # audit_log refuses TRUNCATE by design; tests start from a fresh table instead.
     await admin.execute("""
         ALTER TABLE audit_log DISABLE TRIGGER USER;
-        TRUNCATE fills, cash_ledger, proposals, audit_log RESTART IDENTITY CASCADE;
+        TRUNCATE fills, cash_ledger, proposals, audit_log, accounts RESTART IDENTITY CASCADE;
         ALTER TABLE audit_log ENABLE TRIGGER USER;
-        INSERT INTO cash_ledger (amount, reason) VALUES (1000000, 'initial');""")
+        INSERT INTO accounts (account, initial_capital) VALUES ('operator', 1000000);
+        INSERT INTO cash_ledger (account, amount, reason)
+            VALUES ('operator', 1000000, 'initial');""")
     yield s, admin
     await admin.close()
     await s.close()
 
 
-async def propose(s: BrokerStore, key="run:1", qty=100, side=OrderSide.buy, price=500.0):
-    return await s.propose(client_order_id=key, run_id="1", proposed_by="portfolio-agent",
+async def propose(s: BrokerStore, key="run:1", qty=100, side=OrderSide.buy, price=500.0,
+                  account="operator"):
+    return await s.propose(account=account, client_order_id=key, run_id="1", proposed_by="portfolio-agent",
                            symbol="LUCK", side=side, quantity=qty, ref_price=price,
                            rationale="bullish brief, confidence 0.62", brief=BRIEF,
                            evidence_ids=["ev_000000000001"], marks={})
@@ -85,20 +90,20 @@ async def test_proposal_is_idempotent_on_client_order_id(broker):
     a = await propose(s)
     b = await propose(s, qty=999)  # a retry with different numbers changes nothing
     assert a.id == b.id and b.quantity == 100 and a.status is ProposalStatus.pending
-    assert len(await s.proposals()) == 1
+    assert len(await s.proposals(A)) == 1
 
 
 async def test_approval_fills_at_the_current_quote_with_slippage_and_fees(broker):
     s, _ = broker
     p = await propose(s, qty=100, price=500.0)
-    d = await s.decide(p.id, approve=True, actor="dashboard:saad", note="ok",
+    d = await s.decide(A, p.id, approve=True, actor="dashboard:saad", note="ok",
                        quote=505.0, marks={"LUCK": 505.0})
     assert d.proposal.status is ProposalStatus.filled and d.fill is not None
     assert d.fill.price == pytest.approx(505.505)  # +10 bps
-    pf = await s.portfolio({"LUCK": 505.0})
+    pf = await s.portfolio(A, {"LUCK": 505.0})
     assert pf.cash == pytest.approx(1_000_000 - 50_550.5 - 75.83, abs=0.01)
     assert pf.positions[0].quantity == 100
-    again = await s.decide(p.id, approve=True, actor="dashboard:saad", note="",
+    again = await s.decide(A, p.id, approve=True, actor="dashboard:saad", note="",
                            quote=505.0, marks={})
     assert again.fill is None and again.reason == "already filled"  # no double fill
 
@@ -106,10 +111,10 @@ async def test_approval_fills_at_the_current_quote_with_slippage_and_fees(broker
 async def test_broker_rechecks_at_fill_time_and_refuses_a_moved_price(broker):
     s, _ = broker
     p = await propose(s, qty=100, price=500.0)
-    d = await s.decide(p.id, approve=True, actor="dashboard:saad", note="",
+    d = await s.decide(A, p.id, approve=True, actor="dashboard:saad", note="",
                        quote=530.0, marks={"LUCK": 530.0})  # +6%
     assert d.proposal.status is ProposalStatus.failed and "price moved 6.0%" in d.reason
-    assert (await s.portfolio({})).cash == 1_000_000
+    assert (await s.portfolio(A, {})).cash == 1_000_000
 
 
 async def test_proposal_failing_limits_is_recorded_as_refused(broker):
@@ -123,14 +128,14 @@ async def test_proposal_failing_limits_is_recorded_as_refused(broker):
 async def test_rejection_and_expiry_are_terminal(broker):
     s, admin = broker
     p = await propose(s, key="run:a")
-    d = await s.decide(p.id, approve=False, actor="dashboard:saad", note="not convinced",
+    d = await s.decide(A, p.id, approve=False, actor="dashboard:saad", note="not convinced",
                        quote=None, marks={})
     assert d.proposal.status is ProposalStatus.rejected and d.proposal.decided_by == \
         "dashboard:saad"
     q = await propose(s, key="run:b")
     await admin.execute("UPDATE proposals SET expires_at = now() - interval '1 hour' "
                         "WHERE id = $1", __import__("uuid").UUID(q.id))
-    d = await s.decide(q.id, approve=True, actor="dashboard:saad", note="", quote=500.0,
+    d = await s.decide(A, q.id, approve=True, actor="dashboard:saad", note="", quote=500.0,
                        marks={})
     assert d.proposal.status is ProposalStatus.expired and d.fill is None
 
@@ -138,7 +143,7 @@ async def test_rejection_and_expiry_are_terminal(broker):
 async def test_audit_chain_verifies_and_detects_tampering(broker):
     s, admin = broker
     p = await propose(s)
-    await s.decide(p.id, approve=True, actor="dashboard:saad", note="", quote=500.0,
+    await s.decide(A, p.id, approve=True, actor="dashboard:saad", note="", quote=500.0,
                    marks={"LUCK": 500.0})
     assert [r["action"] for r in await s.audit_log()] == ["order.filled", "proposal.created"]
     assert await s.verify_audit() == {"checked": 2, "first_bad_id": None, "ok": True}
@@ -208,18 +213,22 @@ async def test_the_proposer_cannot_approve_and_the_approver_cannot_propose(broke
     s, _ = broker
     async with broker_http(s) as app:
         async with as_(app, AGENT, {"propose_order", "decide"}) as ts:
-            p = await ts.call("propose_order", client_order_id="run:x", symbol="LUCK",
+            p = await ts.call("propose_order", account=A, client_order_id="run:x",
+                              symbol="LUCK",
                               side="buy", quantity=10, rationale="bullish, conf 0.6",
                               brief=BRIEF, run_id="x")
             assert p["status"] == "pending" and p["proposed_by"] == "portfolio-agent"
             assert p["ref_price"] == 500.0  # the broker priced it, not the caller
             with pytest.raises(McpToolError, match="lacks scope 'broker:decide'"):
-                await ts.call("decide", proposal_id=p["id"], approve=True, decided_by="agent")
+                await ts.call("decide", account=A, proposal_id=p["id"], approve=True,
+                              decided_by="agent")
         async with as_(app, DASH, {"propose_order", "decide"}) as ts:
             with pytest.raises(McpToolError, match="lacks scope 'broker:propose'"):
-                await ts.call("propose_order", client_order_id="run:y", symbol="LUCK",
-                              side="buy", quantity=10, rationale="x" * 20, brief={})
-            d = await ts.call("decide", proposal_id=p["id"], approve=True, decided_by="saad")
+                await ts.call("propose_order", account=A, client_order_id="run:y",
+                              symbol="LUCK", side="buy", quantity=10, rationale="x" * 20,
+                              brief={})
+            d = await ts.call("decide", account=A, proposal_id=p["id"], approve=True,
+                              decided_by="saad")
     assert d["proposal"]["status"] == "filled"
     assert d["proposal"]["decided_by"] == "dashboard:saad"  # service + the human it vouches for
 
@@ -227,17 +236,79 @@ async def test_the_proposer_cannot_approve_and_the_approver_cannot_propose(broke
 async def test_audit_tools_return_structured_results_over_mcp(broker):
     s, _ = broker
     await propose(s)
-    async with broker_http(s) as app, as_(app, DASH, {"audit_log", "verify_audit"}) as ts:
+    async with broker_http(s) as app, as_(app, DASH, {"audit_log", "verify_audit",
+                                                        "activity"}) as ts:
         assert (await ts.call("verify_audit"))["ok"] is True
         (entry,) = await ts.call("audit_log")
+        feed = await ts.call("activity", after_id=0)
     assert entry["action"] == "proposal.created" and entry["actor"] == "portfolio-agent"
+    assert [i["action"] for i in feed["items"]] == ["proposal.created"] and feed["cursor"] == 1
+
+
+# ---------------------------------------------------------------- tenants
+
+
+async def test_accounts_are_isolated_from_each_other(broker):
+    """Two users on one broker: neither sees, decides or spends the other's anything."""
+    s, _ = broker
+    assert await s.open_account("u_b", 500_000, "dashboard") is True
+    assert await s.open_account("u_b", 500_000, "dashboard") is False  # idempotent
+    mine = await propose(s, key="run:1:operator")
+    theirs = await propose(s, key="run:1:u_b", qty=50, account="u_b")
+
+    assert [p.id for p in await s.proposals(A)] == [mine.id]
+    assert [p.id for p in await s.proposals("u_b")] == [theirs.id]
+    assert await s.proposal(A, theirs.id) is None  # another account's id: not found
+    with pytest.raises(LookupError):  # and cannot be approved from the wrong account
+        await s.decide(A, theirs.id, approve=True, actor="dashboard:operator", note="",
+                       quote=500.0, marks={})
+
+    d = await s.decide("u_b", theirs.id, approve=True, actor="dashboard:u_b", note="",
+                       quote=500.0, marks={"LUCK": 500.0})
+    assert d.fill is not None
+    assert (await s.portfolio(A, {})).cash == 1_000_000  # untouched
+    assert (await s.portfolio("u_b", {})).positions[0].quantity == 50
+    assert await s.fills(A) == [] and len(await s.fills("u_b")) == 1
+    assert {e["details"]["account"] for e in await s.audit_log(account="u_b")} == {"u_b"}
+
+    with pytest.raises(ValueError, match="already used"):  # a key is one account's
+        await propose(s, key="run:1:u_b", account=A)
+    from broker_mcp.store import NoAccount
+    with pytest.raises(NoAccount):
+        await propose(s, key="run:1:ghost", account="ghost")
+
+
+async def test_a_brief_concerns_who_follows_or_holds_the_stock(broker):
+    s, _ = broker
+    await s.open_account("u_watch", 1_000_000, "t")
+    await s.open_account("u_held", 1_000_000, "t")
+    await s.open_account("u_other", 1_000_000, "t")
+    await s.watch("u_watch", "LUCK")
+    await s.watch("u_other", "HBL")
+    p = await propose(s, key="k1", account="u_held", qty=10)
+    await s.decide("u_held", p.id, approve=True, actor="t", note="", quote=500.0, marks={})
+    await s.watch("never_opened", "LUCK")  # a watchlist alone is not an account
+    assert await s.interested_accounts("LUCK") == ["u_held", "u_watch"]
+
+
+async def test_activity_feed_tags_each_change_with_its_account(broker):
+    s, _ = broker
+    start = await s.activity(None)
+    await s.open_account("u_b", 1_000_000, "dashboard")
+    await propose(s, key="k2", account="u_b", qty=10)
+    feed = await s.activity(start["cursor"])
+    assert [(i["action"], i["account"]) for i in feed["items"]] == [
+        ("account.opened", "u_b"), ("proposal.created", "u_b")]
+    assert (await s.activity(feed["cursor"]))["items"] == []
+    page = await s.activity(start["cursor"], limit=1)  # paged: resume after the last row
+    assert len(page["items"]) == 1 and page["cursor"] == page["items"][0]["id"]
 
 
 # ---------------------------------------------------------------- marks (portfolio value)
 
 
 class _Held:
-    async def held_symbols(self):
+    async def held_symbols(self, account):
         return ["HBL", "LUCK", "OGDC"]
 
 
@@ -256,7 +327,7 @@ async def test_marks_price_all_holdings_in_one_batch_when_available():
             raise AssertionError("one-by-one pricing must not be used")
 
     q = Batch()
-    assert await marks(_Held(), q, also="MCB") == {s: 100.0 for s in ["HBL", "LUCK", "MCB", "OGDC"]}
+    assert await marks(_Held(), q, A, also="MCB") == {s: 100.0 for s in ["HBL", "LUCK", "MCB", "OGDC"]}
     assert q.calls == [["HBL", "LUCK", "MCB", "OGDC"]]  # one request for every holding
 
 
@@ -267,7 +338,7 @@ async def test_marks_fall_back_to_per_symbol_prices_in_parallel():
         async def price(self, symbol):
             return {"HBL": 1.0, "LUCK": 2.0}.get(symbol)
 
-    assert await marks(_Held(), Single()) == {"HBL": 1.0, "LUCK": 2.0, "OGDC": None}
+    assert await marks(_Held(), Single(), A) == {"HBL": 1.0, "LUCK": 2.0, "OGDC": None}
 
 
 async def test_batch_marks_older_than_the_limit_count_as_stale(monkeypatch):

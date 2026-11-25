@@ -22,6 +22,7 @@ psql -v ON_ERROR_STOP=1 -q \
      -v market_data_pw="$MARKET_DATA_DB_PASSWORD" \
      -v memory_pw="$MEMORY_DB_PASSWORD" \
      -v broker_pw="$BROKER_DB_PASSWORD" \
+     -v dashboard_pw="$DASHBOARD_DB_PASSWORD" \
      -f /migrations/roles.psql
 
 for f in /migrations/[0-9]*.sql; do

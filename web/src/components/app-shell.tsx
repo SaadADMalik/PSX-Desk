@@ -63,13 +63,18 @@ function Brand() {
   )
 }
 
+function initials(name: string) {
+  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]!.toUpperCase()).join("") || "?"
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { theme, setTheme } = useTheme()
   const router = useRouter()
   const { connected, marketOpen, quotes } = useLive()
+  const { data: me } = useSWR<{ name: string; email: string }>("/api/me", fetcher)
 
   async function logout() {
-    await post("/api/logout").catch(() => {})
+    await post("/api/auth/logout").catch(() => {})
     router.push("/login")
   }
 
@@ -113,7 +118,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
               <Sun className="hidden dark:block" /><Moon className="dark:hidden" />
             </Button>
-            <Button variant="ghost" size="icon" aria-label="Sign out" onClick={logout}><LogOut /></Button>
+            {me && (
+              <div className="ml-1 hidden items-center gap-2 lg:flex" title={me.email}>
+                <div className="grid size-7 place-items-center rounded-full bg-primary/15 text-xs font-semibold text-primary">
+                  {initials(me.name)}</div>
+                <span className="max-w-[10rem] truncate text-sm">{me.name}</span>
+              </div>
+            )}
+            <Button variant="ghost" size="icon" aria-label="Sign out" title="Sign out" onClick={logout}><LogOut /></Button>
           </div>
         </header>
         <main className="glow flex-1 px-4 py-6 md:px-8 md:py-8">

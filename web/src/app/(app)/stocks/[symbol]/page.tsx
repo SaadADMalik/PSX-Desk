@@ -16,6 +16,7 @@ import { AlertDialog, AlertList } from "@/components/price-alerts"
 import { ResearchButton } from "@/components/research-button"
 import { TradeDialog } from "@/components/trade-dialog"
 import { WatchButton } from "@/components/watch-button"
+import { ApiError } from "@/lib/api"
 import { useLive } from "@/lib/live"
 import { ago, money, num, pct, price, tone } from "@/lib/format"
 import type { StockData } from "@/lib/types"
@@ -47,6 +48,21 @@ function StockView() {
     return all.slice(-RANGES[range])
   }, [data, range])
 
+  if (error instanceof ApiError && error.status === 404) {
+    return (
+      <Card className="mx-auto mt-10 max-w-md text-center">
+        <CardHeader>
+          <CardTitle>{sym} isn&apos;t traded on PSX</CardTitle>
+          <CardDescription>
+            Check the ticker, or search for the company by name with the search box above.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button variant="outline" render={<Link href="/stocks" />}><ArrowLeft />All stocks</Button>
+        </CardContent>
+      </Card>
+    )
+  }
   if (error) return <p className="text-sm text-loss">Could not load {sym}: {error.message}</p>
   if (isLoading || !data) return <Loading />
 

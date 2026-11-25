@@ -249,6 +249,12 @@ async def _run_tool(by_name: dict[str, Tool], name: str, raw_args: str) -> str:
         try:
             return to_tool_content(await tool.fn(**args))
         except Exception as e:  # noqa: BLE001  the model should see any failure and adapt
-            log.warning("tool %s failed: %s", name, e)
+            # An MCP tool error raised inside the client's context comes out wrapped in an
+            # ExceptionGroup ("unhandled errors in a TaskGroup"): give the model the real
+            # reason, or it cannot adapt and just retries the same call.
+            while isinstance(e, BaseExceptionGroup) and len(e.exceptions) == 1:
+                e = e.exceptions[0]
+            reason = str(e).removeprefix(f"Error executing tool {name}: ")
+            log.warning("tool %s failed: %s", name, reason)
             span.record_exception(e)
-            return to_tool_content({"error": f"{type(e).__name__}: {e}"})
+            return to_tool_content({"error": f"{type(e).__name__}: {reason}"})

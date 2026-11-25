@@ -11,7 +11,7 @@ const LABELS: Record<string, string> = {
   technical_analysis: "price trends", fundamental_analysis: "valuation",
   news_analysis: "announcements", bull_case: "bull case", bear_case: "bear case",
   judgement: "weighing both sides", verification: "checking every number",
-  risk_gate: "risk checks", remember: "saving", proposal: "sizing a trade",
+  announcements: "checking announcements", risk_gate: "risk checks", remember: "saving", proposal: "sizing a trade",
 }
 
 /** Starts a fresh multi-agent brief and shows which step it is on. */

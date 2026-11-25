@@ -6,6 +6,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react"
 import { useSWRConfig } from "swr"
 import { toast } from "sonner"
+import { refreshSession } from "@/lib/api"
 import type { QuotesEvent } from "@/lib/types"
 
 interface Live {
@@ -22,10 +23,29 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
   const pending = useRef<number | null>(null)
 
   useEffect(() => {
-    const es = new EventSource("/api/events")
-    es.onopen = () => setState((s) => ({ ...s, connected: true }))
-    es.onerror = () => setState((s) => ({ ...s, connected: false }))
-    es.onmessage = (e) => {
+    let es: EventSource
+    let closed = false
+    let retry: number | undefined
+
+    function open() {
+      es = new EventSource("/api/events")
+      es.onopen = () => setState((s) => ({ ...s, connected: true }))
+      es.onerror = () => {
+        setState((s) => ({ ...s, connected: false }))
+        // The browser retries dropped connections itself, but not a refused one (an
+        // expired access token): refresh the session, then open a new stream.
+        if (es.readyState === EventSource.CLOSED && !closed) {
+          retry = window.setTimeout(async () => {
+            if (await refreshSession()) open()
+            // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+            else window.location.href = "/login"
+          }, 1000)
+        }
+      }
+      es.onmessage = onMessage
+    }
+
+    function onMessage(e: MessageEvent) {
       const msg = JSON.parse(e.data)
       if (msg.type === "quotes") {
         setState((s) => ({ ...s, quotes: msg.data, marketOpen: msg.data.market_open ?? s.marketOpen }))
@@ -60,7 +80,9 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
              k.startsWith("/api/proposals") || k.startsWith("/api/stocks"))), 300)
       }
     }
-    return () => es.close()
+
+    open()
+    return () => { closed = true; window.clearTimeout(retry); es.close() }
   }, [mutate])
 
   return <LiveContext.Provider value={state}>{children}</LiveContext.Provider>

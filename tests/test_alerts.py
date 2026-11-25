@@ -64,10 +64,13 @@ async def store(pg_url):
     admin = await asyncpg.connect(pg_url)
     await admin.execute("""
         ALTER TABLE audit_log DISABLE TRIGGER USER;
-        TRUNCATE fills, cash_ledger, proposals, audit_log, alert_events, alert_rules,
+        TRUNCATE fills, cash_ledger, proposals, audit_log, alert_events, alert_rules, accounts,
                  watchlists, watchlist_accounts RESTART IDENTITY CASCADE;
         ALTER TABLE audit_log ENABLE TRIGGER USER;
-        INSERT INTO cash_ledger (amount, reason) VALUES (1000000, 'initial');""")
+        INSERT INTO accounts (account, initial_capital)
+            VALUES ('saad', 1000000), ('other', 1000000);
+        INSERT INTO cash_ledger (account, amount, reason)
+            VALUES ('saad', 1000000, 'initial'), ('other', 1000000, 'initial');""")
     yield s, admin
     await admin.close()
     await s.close()
@@ -101,7 +104,7 @@ async def rule(s, **kw):
 async def test_one_fall_alerts_once_then_rearms_after_recovery(store):
     s, admin = store
     r = await rule(s)
-    held = {"LUCK": 200}
+    held = {("saad", "LUCK"): 200}
 
     async def check(price, minutes):
         return await s.check_alerts({"LUCK": price}, held, actor="scheduler",
@@ -227,14 +230,23 @@ async def test_the_user_sets_alerts_the_advisor_only_reads_and_the_scheduler_onl
 
 async def test_a_held_stock_measures_from_its_average_cost(store):
     s, _ = store
-    p = await s.propose(client_order_id="manual:1", run_id=None, proposed_by="dashboard:saad",
+    p = await s.propose(account="saad", client_order_id="manual:1", run_id=None,
+                        proposed_by="dashboard:saad",
                         symbol="LUCK", side=OrderSide.buy, quantity=100, ref_price=80.0,
                         rationale="my own demo trade", brief={}, evidence_ids=[], marks={})
-    await s.decide(p.id, approve=True, actor="dashboard:saad", note="", quote=80.0, marks={})
+    await s.decide("saad", p.id, approve=True, actor="dashboard:saad", note="", quote=80.0,
+                   marks={})
     async with http(s, Quotes()) as app, as_(app, "dashboard", ALERT_TOOLS) as ts:
         a = await ts.call("create_alert", account="saad", symbol="LUCK", kind="pkr",
                           threshold=500, created_by="saad")
+        # saad's shares are saad's: another user holds none, so no rupee alert for them
+        with pytest.raises(McpToolError, match="you don't hold LUCK"):
+            await ts.call("create_alert", account="other", symbol="LUCK", kind="pkr",
+                          threshold=500, created_by="other")
+        b = await ts.call("create_alert", account="other", symbol="LUCK", kind="pct",
+                          threshold=5, created_by="other")
     assert a["ref_basis"] == "avg_cost" and a["ref_price"] == pytest.approx(80.08)  # slippage
+    assert b["ref_basis"] == "price_when_set"  # measured from today's price, not saad's cost
 
 
 # ---------------------------------------------------------------- the scheduler

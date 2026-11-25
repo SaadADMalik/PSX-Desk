@@ -8,26 +8,40 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { post } from "@/lib/api"
+import { cn } from "@/lib/utils"
+
+type Mode = "signin" | "signup"
 
 export default function LoginPage() {
   const router = useRouter()
-  const [user, setUser] = useState("operator")
+  const [mode, setMode] = useState<Mode>("signin")
+  const [name, setName] = useState("")
+  const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
+
+  const signup = mode === "signup"
+  const ready = email.includes("@") && (signup ? name.trim() && password.length >= 10 : password)
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError("")
     try {
-      await post("/api/login", { user, password })
+      await post(signup ? "/api/auth/signup" : "/api/auth/login",
+                 signup ? { name: name.trim(), email, password } : { email, password })
       router.push("/")
     } catch (err) {
       setError((err as Error).message)
     } finally {
       setBusy(false)
     }
+  }
+
+  function switchTo(m: Mode) {
+    setMode(m)
+    setError("")
   }
 
   return (
@@ -44,23 +58,46 @@ export default function LoginPage() {
         </div>
         <Card>
           <CardHeader>
-            <CardTitle>Sign in</CardTitle>
-            <CardDescription>Your password is DASHBOARD_PASSWORD in .env</CardDescription>
+            <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted p-1" role="tablist">
+              {([["signin", "Sign in"], ["signup", "Create account"]] as const).map(([m, label]) => (
+                <button key={m} type="button" role="tab" aria-selected={mode === m} onClick={() => switchTo(m)}
+                  className={cn("rounded-md py-1.5 text-sm font-medium transition",
+                    mode === m ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground")}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            <CardTitle className="pt-3">{signup ? "Create your demo account" : "Welcome back"}</CardTitle>
+            <CardDescription>
+              {signup
+                ? "You get Rs 1,000,000 of demo money, your own watchlist and price alerts."
+                : "Sign in with your email and password."}
+            </CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={submit} className="grid gap-4">
+              {signup && (
+                <div className="grid gap-2">
+                  <Label htmlFor="name">Name</Label>
+                  <Input id="name" value={name} onChange={(e) => setName(e.target.value)}
+                         autoComplete="name" maxLength={60} autoFocus />
+                </div>
+              )}
               <div className="grid gap-2">
-                <Label htmlFor="user">User</Label>
-                <Input id="user" value={user} onChange={(e) => setUser(e.target.value)} autoComplete="username" />
+                <Label htmlFor="email">Email</Label>
+                <Input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+                       autoComplete="email" autoFocus={!signup} />
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="pw">Password</Label>
-                <Input id="pw" type="password" value={password} autoFocus
-                       onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+                <Input id="pw" type="password" value={password}
+                       onChange={(e) => setPassword(e.target.value)}
+                       autoComplete={signup ? "new-password" : "current-password"} />
+                {signup && <p className="text-xs text-muted-foreground">At least 10 characters.</p>}
               </div>
-              {error && <p className="text-sm text-loss">{error}</p>}
-              <Button type="submit" disabled={busy || !password}>
-                {busy && <Loader2 className="animate-spin" />}Sign in
+              {error && <p className="text-sm text-loss" role="alert">{error}</p>}
+              <Button type="submit" disabled={busy || !ready}>
+                {busy && <Loader2 className="animate-spin" />}{signup ? "Create account" : "Sign in"}
               </Button>
             </form>
           </CardContent>

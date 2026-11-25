@@ -1,23 +1,27 @@
-"""Portfolio manager: turns an actionable brief into a paper-trade *proposal*.
+"""Portfolio manager: turns an actionable brief into paper-trade *proposals*, one for
+each account the brief concerns.
 
-    brief + risk ─► [model] intent: buy / sell / hold, target weight, rationale
-                 ─► [code]  sizing: shares from weight, price, cash and limits
-                 ─► broker.propose_order  ─► pending, until a human decides
+    brief + risk ─► [model, once] intent: buy / sell / hold, target weight, rationale
+                 ─► broker.interested_accounts: who follows or holds the stock
+                 ─► per account, [code] sizing: shares from weight, price, its cash, limits
+                 ─► broker.propose_order(account)  ─► pending, until that user decides
 
-Split by what each part is good at. Whether a brief justifies changing a position,
-given what is already held, is judgement: a model. How many shares that is, is
-arithmetic: code. The model gets no tools and writes no numbers the broker uses
-except a target weight, which code clamps.
+Split by what each part is good at. Whether a brief justifies a position is judgement:
+a model. How many shares that is for one account is arithmetic: code. So the model
+runs once per brief, however many users follow the stock, and its cost does not grow
+with users. The model gets no tools and writes no numbers the broker uses except a
+target weight, which code clamps.
 
 What this agent can do, by construction:
   * read the portfolio and propose (broker:read, broker:propose);
   * never approve or execute: it holds no broker:decide scope, and `decide` is not
     on its tool allowlist either. Two independent locks.
 
-Its proposals are idempotent: client_order_id = run:<run id>, so a workflow step
-redone after a crash returns the same proposal instead of a second one.
+Its proposals are idempotent: client_order_id = run:<run id>:<account>, so a workflow
+step redone after a crash returns the same proposals instead of second ones.
 """
 
+import asyncio
 import logging
 import math
 import os
@@ -50,13 +54,13 @@ CASH_BUFFER = 0.99  # leave room for fees
 
 SYSTEM = """You are the portfolio manager of a paper-trading research desk for the
 Pakistan Stock Exchange (PSX). A research brief has passed the desk's verifier and
-risk gate. Decide whether it justifies changing the position in this stock.
+risk gate. Decide what weight in this stock the brief justifies, for any account.
 
-- buy: raise the position to target_weight_pct of equity.
-- sell: cut the position to target_weight_pct (0 = exit). Only if shares are held.
+- buy: hold target_weight_pct of equity in it (accounts below that are topped up).
+- sell: cut to target_weight_pct (0 = exit); applies to accounts that hold it.
 - hold: no change. Often right: a brief is one view, not a mandate.
 - target_weight_pct is at most {max_pos} and should scale with confidence.
-- Consider what is already held and how concentrated the portfolio is.
+- Code sizes each account's order from its own cash and holdings; you set the weight.
 - rationale: 1-3 sentences a human approver can check against the brief.
 
 This is paper trading for research, not investment advice.
@@ -65,9 +69,8 @@ Reply with ONLY: {{"action": "buy"|"sell"|"hold", "target_weight_pct": number,
 "rationale": str}}"""
 
 
-def describe(req: ProposeTradeRequest, pf: Portfolio, price: float) -> str:
+def describe(req: ProposeTradeRequest, price: float) -> str:
     b, r = req.brief, req.risk
-    held = next((p for p in pf.positions if p.symbol == req.symbol), None)
     lines = [
         f"Symbol: {req.symbol}. Current price: {price}.",
         f"Brief: {b['stance']} (confidence {b['confidence']:.2f}). {b['thesis']}",
@@ -76,11 +79,6 @@ def describe(req: ProposeTradeRequest, pf: Portfolio, price: float) -> str:
         "Risk gate: {}; flags: {}".format(
             r["verdict"],
             "; ".join(f"{f['rule']}: {f['detail']}" for f in r.get("flags", [])) or "none"),
-        (f"Portfolio: equity {pf.equity:,.0f} PKR, cash {pf.cash:,.0f} PKR, "
-         f"{len(pf.positions)} positions."),
-        (f"Held: {held.quantity} shares, {held.weight_pct}% of equity." if held
-         else f"Not held. Largest position: "
-              f"{max((p.weight_pct for p in pf.positions), default=0)}% of equity."),
     ]
     return "\n".join(lines)
 
@@ -111,6 +109,9 @@ def size(intent: TradeIntent, stance: str, confidence: float, pf: Portfolio, sym
     return intent.action, qty, intent.rationale
 
 
+FANOUT = 8  # accounts sized and proposed to at once
+
+
 async def propose_trade(payload: dict) -> dict:
     req = ProposeTradeRequest.model_validate(payload)
     if not req.risk.get("actionable"):
@@ -122,43 +123,73 @@ async def propose_trade(payload: dict) -> dict:
         quote = await md.call("get_valuation", symbol=req.symbol)
     price = quote["values"].get("price")
     if not price or quote.get("stale"):
-        return result.model_copy(update={"reason": "no live price; nothing proposed"}) \
-            .model_dump(mode="json")
+        return result.model_copy(update={"reason": "no live price; nothing proposed"})             .model_dump(mode="json")
 
-    async with McpToolset(BROKER, allow={"get_portfolio", "propose_order"}) as broker:
-        pf = Portfolio.model_validate(await broker.call("get_portfolio"))
-        client = GatewayClient(GATEWAY, caller="portfolio-agent", lane=Lane.pipeline)
-        try:
-            reply = await client.chat(
-                [ChatMessage(role="system", content=SYSTEM.format(max_pos=MAX_POSITION_PCT)),
-                 ChatMessage(role="user", content=describe(req, pf, price))],
-                tier=Tier.small, max_tokens=700)
-            intent, _ = await parse_with_repair(client, reply.message.content or "",
-                                                TradeIntent, tier=Tier.small)
-            tokens = reply.usage.total_tokens
-        finally:
-            await client.aclose()
+    # ---- the judgement, once per brief
+    client = GatewayClient(GATEWAY, caller="portfolio-agent", lane=Lane.pipeline)
+    try:
+        reply = await client.chat(
+            [ChatMessage(role="system", content=SYSTEM.format(max_pos=MAX_POSITION_PCT)),
+             ChatMessage(role="user", content=describe(req, price))],
+            tier=Tier.small, max_tokens=700)
+        intent, _ = await parse_with_repair(client, reply.message.content or "",
+                                            TradeIntent, tier=Tier.small)
+        tokens = reply.usage.total_tokens
+    finally:
+        await client.aclose()
+    result = result.model_copy(update={"action": intent.action, "reason": intent.rationale,
+                                       "tokens_used": tokens,
+                                       "target_weight_pct": intent.target_weight_pct})
+    if intent.action == "buy" and req.brief["stance"] != "bullish":
+        return result.model_copy(update={
+            "action": "hold",
+            "reason": f"model said buy on a {req.brief['stance']} brief; overridden to hold",
+        }).model_dump(mode="json")
+    if intent.action == "hold":
+        return result.model_dump(mode="json")
 
-        action, qty, reason = size(intent, req.brief["stance"], req.brief["confidence"], pf,
-                                   req.symbol, float(price))
-        result = result.model_copy(update={"action": action, "quantity": qty,
-                                           "reason": reason, "tokens_used": tokens})
-        if action == "hold":
-            return result.model_dump(mode="json")
+    brief_view = {k: req.brief[k] for k in ("stance", "confidence", "thesis")}
+    brief_view |= {"risk": req.risk["verdict"],
+                   "flags": [f["rule"] for f in req.risk.get("flags", [])],
+                   "key_points": [c["text"] for c in req.brief.get("key_points", [])][:4],
+                   "risks": [c["text"] for c in req.brief.get("risks", [])][:4]}
+    ids = sorted({i for c in [*req.brief.get("key_points", []), *req.brief.get("risks", [])]
+                  for i in c["evidence_ids"]})
 
-        brief_view = {k: req.brief[k] for k in ("stance", "confidence", "thesis")}
-        brief_view |= {"risk": req.risk["verdict"],
-                       "flags": [f["rule"] for f in req.risk.get("flags", [])],
-                       "key_points": [c["text"] for c in req.brief.get("key_points", [])][:4],
-                       "risks": [c["text"] for c in req.brief.get("risks", [])][:4]}
-        ids = sorted({i for c in [*req.brief.get("key_points", []), *req.brief.get("risks", [])]
-                      for i in c["evidence_ids"]})
-        p = await broker.call("propose_order", client_order_id=f"run:{req.run_id}",
-                              symbol=req.symbol, side=action, quantity=qty,
-                              rationale=reason[:1000], brief=brief_view, run_id=req.run_id,
-                              evidence_ids=ids)
-    return result.model_copy(update={"proposal_id": p["id"], "status": p["status"]}) \
-        .model_dump(mode="json")
+    # ---- the arithmetic, per account that follows or holds the stock
+    gate = asyncio.Semaphore(FANOUT)
+    async with McpToolset(BROKER, allow={"interested_accounts", "get_portfolio",
+                                         "propose_order"}) as broker:
+        accounts = await broker.call("interested_accounts", symbol=req.symbol)
+
+        async def one(account: str) -> str | None:
+            async with gate:
+                try:
+                    pf = Portfolio.model_validate(
+                        await broker.call("get_portfolio", account=account))
+                    action, qty, reason = size(intent, req.brief["stance"],
+                                               req.brief["confidence"], pf, req.symbol,
+                                               float(price))
+                    if action == "hold":
+                        return None
+                    p = await broker.call(
+                        "propose_order", account=account,
+                        client_order_id=f"run:{req.run_id}:{account}", symbol=req.symbol,
+                        side=action, quantity=qty, rationale=reason[:1000], brief=brief_view,
+                        run_id=req.run_id, evidence_ids=ids)
+                    return p["status"]
+                except Exception as e:  # noqa: BLE001  one account never sinks the rest
+                    log.warning("proposal for one account failed: %s", e)
+                    return "error"
+
+        statuses = await asyncio.gather(*(one(a) for a in accounts))
+    pending = sum(s == "pending" for s in statuses)
+    return result.model_copy(update={
+        "accounts": pending, "status": "pending" if pending else None,
+        "reason": intent.rationale if pending else
+                  f"{intent.rationale} (no account needed a change: "
+                  f"{len(accounts)} follow or hold {req.symbol})",
+    }).model_dump(mode="json")
 
 
 app = build_a2a_app(A2AService(

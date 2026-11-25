@@ -14,9 +14,11 @@
 "pta.gov.pk" = "Telecom regulator"
 "cdc.com.pk" = "Central Depository Company"
 
-# Each listed company's own website: annual reports, investor relations, press releases.
-# Add a line when you add a stock to your watchlist. `aliases`: words that identify the
-# company in a question, so a search finds its site even without the right ticker.
+# Companies' own websites: annual reports, investor relations, press releases.
+# Every PSX-listed company is covered: one not named here gets the website PSX lists on
+# its company profile (dps.psx.com.pk/company/<SYMBOL>), looked up when first asked
+# about. A line here overrides that, and its `aliases` (words that identify the company
+# in a question) let a search find the site even without the right ticker.
 [companies]
 LUCK = { domain = "lucky-cement.com", name = "Lucky Cement", aliases = ["lucky cement"] }
 ENGRO = { domain = "engro.com", name = "Engro Corporation", aliases = ["engro"] }

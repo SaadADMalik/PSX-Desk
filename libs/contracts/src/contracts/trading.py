@@ -57,6 +57,7 @@ class Portfolio(BaseModel):
 class Proposal(BaseModel):
     schema_version: Literal["proposal.v1"] = "proposal.v1"
     id: str
+    account: str  # whose demo account it is for
     client_order_id: str
     run_id: str | None
     proposed_by: str
@@ -110,6 +111,9 @@ class ProposeTradeRequest(BaseModel):
 
 
 class ProposeTradeResult(BaseModel):
+    """The desk's call on a brief, and how many accounts got a proposal from it.
+    Shared with everyone who sees the brief, so it names no account."""
+
     run_id: str
     symbol: str
     action: Literal["buy", "sell", "hold"]
@@ -118,6 +122,8 @@ class ProposeTradeResult(BaseModel):
     quantity: int = 0
     reason: str
     tokens_used: int = 0
+    target_weight_pct: float = 0
+    accounts: int = 0  # accounts that received a pending proposal
 
 
 # ---------------------------------------------------------------- watchlists and alerts
