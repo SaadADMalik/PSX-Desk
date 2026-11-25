@@ -166,7 +166,8 @@ async def propose_trade(payload: dict) -> dict:
             async with gate:
                 try:
                     pf = Portfolio.model_validate(
-                        await broker.call("get_portfolio", account=account))
+                        await broker.call("get_portfolio", account=account,
+                                          symbol=req.symbol))  # allowed: it follows it
                     action, qty, reason = size(intent, req.brief["stance"],
                                                req.brief["confidence"], pf, req.symbol,
                                                float(price))

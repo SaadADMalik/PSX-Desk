@@ -62,7 +62,8 @@ def pg_url():
                     raise
                 await asyncio.sleep(0.5)
         await c.execute("CREATE ROLE gateway; CREATE ROLE orchestrator; "
-                        "CREATE ROLE market_data; CREATE ROLE memory; CREATE ROLE broker; "
+                        "CREATE ROLE market_data; CREATE ROLE memory; "
+                        "CREATE ROLE broker LOGIN PASSWORD 'broker-test'; "
                         "CREATE ROLE dashboard;")
         for f in sorted(MIGRATIONS.glob("[0-9]*.sql")):
             await c.execute(f.read_text(encoding="utf-8"))
@@ -71,3 +72,13 @@ def pg_url():
     asyncio.run(migrate())
     yield container.get_connection_url()
     container.stop()
+
+
+@pytest.fixture(scope="session")
+def broker_url(pg_url):
+    """The same database as the `broker` role, as the broker service connects: not a
+    superuser, so its table grants and row-level security policies are really tested."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    u = urlsplit(pg_url)
+    return urlunsplit(u._replace(netloc=f"broker:broker-test@{u.hostname}:{u.port}"))

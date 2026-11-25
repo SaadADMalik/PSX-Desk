@@ -38,7 +38,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import uvicorn
 from agentkit.a2a import AgentDirectory
-from agentkit.auth import bearer_for
+from agentkit.auth import MAX_TTL_S, bearer_for, default_identity
 from agentkit.mcp_tools import McpToolError, McpToolset
 from agentkit.tracing import setup_tracing
 from contracts.events import BRIEFS
@@ -147,7 +147,19 @@ async def _call(url: str, tool: str, args: dict):
     raise failed
 
 
+def user_grant(account: str, party: str = "dashboard", ttl_s: int = 60) -> str | None:
+    """The signed-in user's grant (agentkit.auth): proof for the broker that this
+    account's owner is signed in, usable only by `party`. The dashboard is the one
+    service that checks passwords, so it is the one that issues these. None when this
+    process has no signing key (tests, local runs without auth)."""
+    me = default_identity()
+    return me.mint_grant(account, "broker", party, ttl_s) if me else None
+
+
 async def broker(tool: str, **args):
+    # Every per-account call carries the user's grant; the broker refuses it otherwise.
+    if "account" in args and (g := user_grant(args["account"])):
+        args["grant"] = g
     return await _call(BROKER, tool, args)
 
 
@@ -771,11 +783,18 @@ class ChatBody(BaseModel):
     messages: list[ChatMessageIn] = Field(min_length=1, max_length=40)
 
 
+def _advisor_payload(user: User, body: "ChatBody") -> dict:
+    """What the advisor gets: the conversation, the account, and a grant that lets it
+    act for this one user at the broker, for one chat (a few minutes), and that only
+    the advisor can present."""
+    return {"user": user.account, "messages": [m.model_dump() for m in body.messages[-12:]],
+            "grant": user_grant(user.account, party="advisor-agent", ttl_s=MAX_TTL_S)}
+
+
 @app.post("/api/chat")
 async def chat(body: ChatBody, request: Request, user: Me) -> dict:
     try:
-        return await request.app.state.advisor.call(
-            "chat", {"user": user.account, "messages": [m.model_dump() for m in body.messages[-12:]]})
+        return await request.app.state.advisor.call("chat", _advisor_payload(user, body))
     except Exception as e:
         log.warning("advisor failed: %s", e)
         raise HTTPException(502, "The advisor is unavailable right now. Try again shortly.") \
@@ -787,7 +806,7 @@ async def chat_stream(body: ChatBody, request: Request,
                       user: Me) -> StreamingResponse:
     """The advisor's reply as server-sent events, relayed from its A2A stream:
     tool steps and answer text as they happen, then {"type": "done", ...the reply}."""
-    payload = {"user": user.account, "messages": [m.model_dump() for m in body.messages[-12:]]}
+    payload = _advisor_payload(user, body)
 
     async def events():
         try:

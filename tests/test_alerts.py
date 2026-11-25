@@ -59,8 +59,8 @@ def test_a_window_expires_and_no_price_means_no_judgement():
 
 
 @pytest.fixture
-async def store(pg_url):
-    s = await BrokerStore.connect(pg_url, BrokerPolicy())
+async def store(pg_url, broker_url):
+    s = await BrokerStore.connect(broker_url, BrokerPolicy())
     admin = await asyncpg.connect(pg_url)
     await admin.execute("""
         ALTER TABLE audit_log DISABLE TRIGGER USER;
@@ -172,7 +172,8 @@ class Quotes:
 IDS = {n: Identity(n, Ed25519PrivateKey.generate())
        for n in ("dashboard", "advisor-agent", "scheduler")}
 GRANTS = {"dashboard": frozenset({"broker:read", "broker:decide", "watchlist:read",
-                                  "watchlist:write", "alerts:read", "alerts:write"}),
+                                  "watchlist:write", "alerts:read", "alerts:write",
+                                  "grants:issue"}),
           "advisor-agent": frozenset({"broker:read", "watchlist:read", "alerts:read"}),
           "scheduler": frozenset({"watchlist:all", "alerts:check"})}
 
@@ -198,26 +199,31 @@ def as_(app, name, allow):
 ALERT_TOOLS = {"create_alert", "list_alerts", "check_alerts", "watch", "get_watchlist"}
 
 
+def g(account: str, party: str = "dashboard") -> str:
+    """The user's grant, as the dashboard signs it when they are signed in."""
+    return IDS["dashboard"].mint_grant(account, "broker", party)
+
+
 async def test_the_user_sets_alerts_the_advisor_only_reads_and_the_scheduler_only_checks(store):
     s, _ = store
     q = Quotes()
     async with http(s, q) as app:
         async with as_(app, "dashboard", ALERT_TOOLS) as ts:
             with pytest.raises(McpToolError, match="needs a position"):
-                await ts.call("create_alert", account="saad", symbol="LUCK", kind="pkr",
+                await ts.call("create_alert", account="saad", grant=g("saad"), symbol="LUCK", kind="pkr",
                               threshold=1000, created_by="saad")
-            a = await ts.call("create_alert", account="saad", symbol="LUCK", kind="pct",
+            a = await ts.call("create_alert", account="saad", grant=g("saad"), symbol="LUCK", kind="pct",
                               threshold=5, created_by="saad", days=7)
             assert (a["ref_basis"], a["ref_price"]) == ("price_when_set", 100.0)
             assert a["created_by"] == "dashboard:saad" and a["ends_at"]
-            await ts.call("watch", account="saad", symbol="luck")
+            await ts.call("watch", account="saad", grant=g("saad"), symbol="luck")
             with pytest.raises(McpToolError, match="lacks scope 'alerts:check'"):
                 await ts.call("check_alerts")
         async with as_(app, "advisor-agent", ALERT_TOOLS) as ts:
-            assert len(await ts.call("list_alerts", account="saad")) == 1
-            assert await ts.call("get_watchlist", account="saad") == ["LUCK"]
+            assert len(await ts.call("list_alerts", account="saad", grant=g("saad", "advisor-agent"))) == 1
+            assert await ts.call("get_watchlist", account="saad", grant=g("saad", "advisor-agent")) == ["LUCK"]
             with pytest.raises(McpToolError, match="lacks scope 'alerts:write'"):
-                await ts.call("create_alert", account="saad", symbol="LUCK", kind="pct",
+                await ts.call("create_alert", account="saad", grant=g("saad", "advisor-agent"), symbol="LUCK", kind="pct",
                               threshold=1, created_by="saad")
         q.px["LUCK"] = 94.0
         async with as_(app, "scheduler", ALERT_TOOLS) as ts:
@@ -237,13 +243,13 @@ async def test_a_held_stock_measures_from_its_average_cost(store):
     await s.decide("saad", p.id, approve=True, actor="dashboard:saad", note="", quote=80.0,
                    marks={})
     async with http(s, Quotes()) as app, as_(app, "dashboard", ALERT_TOOLS) as ts:
-        a = await ts.call("create_alert", account="saad", symbol="LUCK", kind="pkr",
+        a = await ts.call("create_alert", account="saad", grant=g("saad"), symbol="LUCK", kind="pkr",
                           threshold=500, created_by="saad")
         # saad's shares are saad's: another user holds none, so no rupee alert for them
         with pytest.raises(McpToolError, match="you don't hold LUCK"):
-            await ts.call("create_alert", account="other", symbol="LUCK", kind="pkr",
+            await ts.call("create_alert", account="other", grant=g("other"), symbol="LUCK", kind="pkr",
                           threshold=500, created_by="other")
-        b = await ts.call("create_alert", account="other", symbol="LUCK", kind="pct",
+        b = await ts.call("create_alert", account="other", grant=g("other"), symbol="LUCK", kind="pct",
                           threshold=5, created_by="other")
     assert a["ref_basis"] == "avg_cost" and a["ref_price"] == pytest.approx(80.08)  # slippage
     assert b["ref_basis"] == "price_when_set"  # measured from today's price, not saad's cost
