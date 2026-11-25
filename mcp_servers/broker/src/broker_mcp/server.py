@@ -176,6 +176,27 @@ def build_server(store: BrokerStore | None = None, quotes: Quotes | None = None,
             if own is not None:
                 await own.close()
 
+    async def acting_for(account: str, grant: str | None, *,
+                         follows: str | None = None) -> str:
+        """The account this call may act for. A service saying "account X" is not
+        enough: it must present X's user grant, signed by the dashboard when X signed
+        in, meant for the broker and for this very service (agentkit.auth). The one
+        exception is research fan-out, which runs with nobody signed in: a caller
+        holding accounts:followers may act for an account only if that account follows
+        or holds `follows`, the stock being researched, and only through the tools
+        that pass it (read the portfolio, create a pending proposal)."""
+        account = _account(account)
+        if not guard.enabled:
+            return account  # in-process: tests and local tools
+        if grant:
+            if guard.granted_account(grant) != account:
+                raise ToolError("forbidden: the grant is for another account")
+            return account
+        if follows and guard.has("accounts:followers") \
+                and await state["store"].follows(account, _symbol(follows)):
+            return account
+        raise ToolError("forbidden: acting for an account needs that user's grant")
+
     server = MCPServer(
         "psx-paper-broker", version="0.1.0", lifespan=lifespan,
         instructions=("Paper trading only. Proposals need a human decision; the broker "
@@ -183,10 +204,11 @@ def build_server(store: BrokerStore | None = None, quotes: Quotes | None = None,
         **guard.server_kwargs())
 
     @server.tool(annotations=WRITE)
-    async def open_account(account: str) -> bool:
+    async def open_account(account: str, grant: str | None = None) -> bool:
         """Open a demo account with its starting cash. False if it was already open."""
         caller = guard.require("accounts:open") or "unauthenticated"
-        return await state["store"].open_account(_account(account), INITIAL_CAPITAL, caller)
+        return await state["store"].open_account(await acting_for(account, grant),
+                                                 INITIAL_CAPITAL, caller)
 
     @server.tool(annotations=READ)
     async def interested_accounts(symbol: str) -> list[str]:
@@ -195,54 +217,61 @@ def build_server(store: BrokerStore | None = None, quotes: Quotes | None = None,
         return await state["store"].interested_accounts(_symbol(symbol))
 
     @server.tool(annotations=READ)
-    async def get_portfolio(account: str) -> Portfolio:
+    async def get_portfolio(account: str, grant: str | None = None,
+                            symbol: str | None = None) -> Portfolio:
         """This account's cash, positions (average cost, latest mark, weight) and equity,
-        in PKR."""
+        in PKR. `symbol`: for research fan-out, the stock that makes this account
+        relevant (see acting_for)."""
         guard.require("broker:read")
-        account = _account(account)
+        account = await acting_for(account, grant, follows=symbol)
         return await state["store"].portfolio(
             account, await marks(state["store"], state["quotes"], account))
 
     @server.tool(annotations=READ)
     async def list_proposals(account: str, status: str | None = None, limit: int = 50,
-                             run_id: str | None = None) -> list[Proposal]:
+                             run_id: str | None = None,
+                             grant: str | None = None) -> list[Proposal]:
         """This account's proposals, newest first; optionally one status (pending,
         filled, ...) or the ones from one research run."""
         guard.require("broker:read")
-        return await state["store"].proposals(_account(account), status,
+        return await state["store"].proposals(await acting_for(account, grant), status,
                                               max(1, min(limit, 200)), run_id)
 
     @server.tool(annotations=READ)
-    async def get_proposal(account: str, proposal_id: str) -> Proposal:
+    async def get_proposal(account: str, proposal_id: str,
+                           grant: str | None = None) -> Proposal:
         """One of this account's proposals with its checks and the brief it came from."""
         guard.require("broker:read")
         if not UUID_RE.match(proposal_id):
             raise ToolError("invalid proposal id")
-        p = await state["store"].proposal(_account(account), proposal_id)
+        p = await state["store"].proposal(await acting_for(account, grant), proposal_id)
         if p is None:
             raise ToolError("no such proposal")
         return p
 
     @server.tool(annotations=READ)
-    async def list_fills(account: str, limit: int = 50) -> list[Fill]:
+    async def list_fills(account: str, limit: int = 50,
+                         grant: str | None = None) -> list[Fill]:
         """This account's executed demo fills, newest first."""
         guard.require("broker:read")
-        return await state["store"].fills(_account(account), max(1, min(limit, 200)))
+        return await state["store"].fills(await acting_for(account, grant),
+                                          max(1, min(limit, 200)))
 
     @server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False,
                                              idempotent_hint=True, open_world_hint=False))
     async def propose_order(account: str, client_order_id: str, symbol: str, side: str,
                             quantity: int, rationale: str, brief: dict,
                             run_id: str | None = None,
-                            evidence_ids: list[str] | None = None) -> Proposal:
+                            evidence_ids: list[str] | None = None,
+                            grant: str | None = None) -> Proposal:
         """Propose a paper trade for a human to approve. Executes nothing. The same
         client_order_id always returns the same proposal. The broker prices it itself."""
         caller = guard.require("broker:propose") or "unauthenticated"
-        account = _account(account)
         if not KEY_RE.match(client_order_id):
             raise ToolError("invalid client_order_id")
         if not SYMBOL_RE.match(symbol):
             raise ToolError("invalid symbol")
+        account = await acting_for(account, grant, follows=symbol)
         if side not in ("buy", "sell") or not 1 <= quantity <= MAX_QUANTITY:
             raise ToolError("side must be buy or sell; quantity 1..1,000,000")
         if not 10 <= len(rationale) <= 1000 or len(str(brief)) > 8000:
@@ -263,13 +292,13 @@ def build_server(store: BrokerStore | None = None, quotes: Quotes | None = None,
     @server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True,
                                              idempotent_hint=True, open_world_hint=False))
     async def decide(account: str, proposal_id: str, approve: bool, decided_by: str,
-                     note: str = "") -> Decision:
+                     note: str = "", grant: str | None = None) -> Decision:
         """A human's decision on a pending proposal. Approval fills it at the current quote
         if the broker's limits still pass; otherwise it fails with the reason."""
         caller = guard.require("broker:decide") or "unauthenticated"
         if not UUID_RE.match(proposal_id) or not re.match(r"^[a-z0-9_.\-]{1,40}$", decided_by):
             raise ToolError("invalid proposal id or decided_by")
-        account = _account(account)
+        account = await acting_for(account, grant)
         p = await state["store"].proposal(account, proposal_id)
         if p is None:
             raise ToolError("no such proposal")
@@ -284,12 +313,13 @@ def build_server(store: BrokerStore | None = None, quotes: Quotes | None = None,
     @server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True,
                                              idempotent_hint=True, open_world_hint=False))
     async def place_order(account: str, client_order_id: str, symbol: str, side: str,
-                          quantity: int, placed_by: str, note: str = "") -> Decision:
+                          quantity: int, placed_by: str, note: str = "",
+                          grant: str | None = None) -> Decision:
         """A demo trade the human places themself: recorded as a proposal and decided in
         one go, at the current quote, under the same limits. Idempotent on
         client_order_id (a double click fills once)."""
         caller = guard.require("broker:trade") or "unauthenticated"
-        account = _account(account)
+        account = await acting_for(account, grant)
         if not KEY_RE.match(client_order_id) or not SYMBOL_RE.match(symbol):
             raise ToolError("invalid client_order_id or symbol")
         if side not in ("buy", "sell") or not 1 <= quantity <= MAX_QUANTITY:
@@ -318,14 +348,13 @@ def build_server(store: BrokerStore | None = None, quotes: Quotes | None = None,
 
     # ------------------------------------------------------------ watchlists
     #
-    # `account` is the human the calling service vouches for (the dashboard for the
-    # signed-in user, the advisor for the user it is talking to), like `decided_by`.
+    # Every per-account tool takes the user's `grant` (see acting_for).
 
     @server.tool(annotations=READ)
-    async def get_watchlist(account: str) -> list[str]:
+    async def get_watchlist(account: str, grant: str | None = None) -> list[str]:
         """The stocks this account follows, in the order they were added."""
         guard.require("watchlist:read")
-        return await state["store"].watchlist(_account(account))
+        return await state["store"].watchlist(await acting_for(account, grant))
 
     @server.tool(annotations=READ)
     async def watched_symbols() -> list[str]:
@@ -334,52 +363,59 @@ def build_server(store: BrokerStore | None = None, quotes: Quotes | None = None,
         return await state["store"].watched_symbols()
 
     @server.tool(annotations=WRITE)
-    async def init_watchlist(account: str, symbols: list[str]) -> bool:
+    async def init_watchlist(account: str, symbols: list[str],
+                             grant: str | None = None) -> bool:
         """Give a new account its starting watchlist. Does nothing if the account has
         had a watchlist before (an emptied list stays empty)."""
         guard.require("watchlist:write")
         return await state["store"].init_watchlist(
-            _account(account), [_symbol(s) for s in symbols[:60]])
+            await acting_for(account, grant), [_symbol(s) for s in symbols[:60]])
 
     @server.tool(annotations=WRITE)
-    async def watch(account: str, symbol: str) -> list[str]:
+    async def watch(account: str, symbol: str, grant: str | None = None) -> list[str]:
         """Add a stock to this account's watchlist. Returns the new list."""
         guard.require("watchlist:write")
+        account = await acting_for(account, grant)
         try:
-            return await state["store"].watch(_account(account), _symbol(symbol))
+            return await state["store"].watch(account, _symbol(symbol))
         except ValueError as e:
             raise ToolError(str(e)) from e
 
     @server.tool(annotations=WRITE)
-    async def unwatch(account: str, symbol: str) -> list[str]:
+    async def unwatch(account: str, symbol: str, grant: str | None = None) -> list[str]:
         """Remove a stock from this account's watchlist. Returns the new list."""
         guard.require("watchlist:write")
-        return await state["store"].unwatch(_account(account), _symbol(symbol))
+        return await state["store"].unwatch(await acting_for(account, grant),
+                                            _symbol(symbol))
 
     # ------------------------------------------------------------ price alerts
 
     @server.tool(annotations=READ)
-    async def list_alerts(account: str, active_only: bool = False) -> list[AlertRule]:
+    async def list_alerts(account: str, active_only: bool = False,
+                          grant: str | None = None) -> list[AlertRule]:
         """This account's price alerts, newest first."""
         guard.require("alerts:read")
-        return await state["store"].alerts(_account(account), active_only)
+        return await state["store"].alerts(await acting_for(account, grant), active_only)
 
     @server.tool(annotations=READ)
-    async def list_alert_events(account: str, limit: int = 50) -> list[AlertEvent]:
+    async def list_alert_events(account: str, limit: int = 50,
+                                grant: str | None = None) -> list[AlertEvent]:
         """When this account's alerts fired or re-armed, newest first."""
         guard.require("alerts:read")
-        return await state["store"].alert_events(_account(account), max(1, min(limit, 200)))
+        return await state["store"].alert_events(await acting_for(account, grant),
+                                                 max(1, min(limit, 200)))
 
     @server.tool(annotations=WRITE)
     async def create_alert(account: str, symbol: str, kind: str, threshold: float,
-                           created_by: str, days: int | None = None) -> AlertRule:
+                           created_by: str, days: int | None = None,
+                           grant: str | None = None) -> AlertRule:
         """Alert when a stock falls. kind "pct": the price falls `threshold` percent below
         the reference. kind "pkr": the position loses `threshold` rupees (needs shares
         held). The reference is your average cost if you hold the stock, else today's
         price. `days`: watch for this many days from now; omit to watch until cancelled.
         It fires once per fall and re-arms after the price recovers past 80% of it."""
         caller = guard.require("alerts:write") or "unauthenticated"
-        account, symbol = _account(account), _symbol(symbol)
+        account, symbol = await acting_for(account, grant), _symbol(symbol)
         if not re.match(r"^[a-z0-9_.\-:]{1,60}$", created_by):
             raise ToolError("invalid created_by")
         if kind == "pct" and not 0.1 <= threshold <= 90:
@@ -410,13 +446,14 @@ def build_server(store: BrokerStore | None = None, quotes: Quotes | None = None,
             raise ToolError(str(e)) from e
 
     @server.tool(annotations=WRITE)
-    async def cancel_alert(account: str, alert_id: str, cancelled_by: str) -> AlertRule:
+    async def cancel_alert(account: str, alert_id: str, cancelled_by: str,
+                           grant: str | None = None) -> AlertRule:
         """Stop one of this account's alerts."""
         caller = guard.require("alerts:write") or "unauthenticated"
         if not UUID_RE.match(alert_id) or not re.match(r"^[a-z0-9_.\-]{1,40}$", cancelled_by):
             raise ToolError("invalid alert id or cancelled_by")
         rule = await state["store"].cancel_alert(
-            _account(account), alert_id, f"{caller}:{cancelled_by}")
+            await acting_for(account, grant), alert_id, f"{caller}:{cancelled_by}")
         if rule is None:
             raise ToolError("no such alert")
         return rule
@@ -437,11 +474,15 @@ def build_server(store: BrokerStore | None = None, quotes: Quotes | None = None,
         return await store.check_alerts(prices, await store.holdings(symbols), actor=caller)
 
     @server.tool(annotations=READ)
-    async def audit_log(limit: int = 50, account: str | None = None) -> list[AuditEntry]:
-        """The append-only audit trail, newest first; with `account`, only its entries."""
+    async def audit_log(limit: int = 50, account: str | None = None,
+                        grant: str | None = None) -> list[AuditEntry]:
+        """The append-only audit trail, newest first; with `account`, only its entries.
+        Without it, everyone's: that needs audit:all (the operator only)."""
         guard.require("audit:read")
-        rows = await state["store"].audit_log(max(1, min(limit, 500)),
-                                              _account(account) if account else None)
+        if account is None:
+            guard.require("audit:all")
+        rows = await state["store"].audit_log(
+            max(1, min(limit, 500)), await acting_for(account, grant) if account else None)
         return [AuditEntry(**r) for r in rows]
 
     @server.tool(annotations=READ)

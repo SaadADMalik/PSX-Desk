@@ -24,6 +24,23 @@ service does not let it mint tokens as any other.
 Everything here is off when no keys are configured (unit tests), and fail-closed
 when AUTH_REQUIRED=1 (every container): a missing key then stops the service at
 startup instead of silently running open.
+
+User grants: acting for one person
+----------------------------------
+A service token says which *service* is calling. It does not say for whom. So a
+receiver holding user data (the broker) also wants proof that the person agreed:
+
+    you sign in ─► dashboard (the only service that checks passwords)
+                     mints a grant {typ: user-grant, iss: dashboard, sub: <account>,
+                                    aud: broker, azp: <who may present it>, exp: 60 s}
+                 ─► the presenting service passes it along with the call
+    broker       ─► verifies: signed by an issuer the policy allows ("grants:issue"),
+                    meant for the broker, presented by the service named in `azp`,
+                    unexpired; then acts for `sub` and nobody else
+
+So the advisor, given a grant for one chat, can act only for that user, only for a
+few minutes; a grant stolen from it cannot be used by any other service; and a
+service with no grant cannot name an account at all.
 """
 
 from __future__ import annotations
@@ -47,6 +64,8 @@ log = logging.getLogger(__name__)
 
 TOKEN_TTL_S = 60
 MAX_TTL_S = 300  # refuse long-lived tokens even if correctly signed
+GRANT_TYPE = "user-grant"
+GRANT_ISSUE_SCOPE = "grants:issue"  # who may vouch for a signed-in user, per receiver
 LEEWAY_S = 5  # clock skew between containers
 
 # Host-side tools reach services through published loopback ports; the audience is
@@ -92,6 +111,17 @@ class Identity:
         return jwt.encode(
             {"iss": self.name, "sub": self.name, "aud": audience, "iat": now,
              "exp": now + ttl_s, "jti": uuid.uuid4().hex},
+            self.key, algorithm="EdDSA", headers={"kid": self.name})
+
+    def mint_grant(self, account: str, audience: str, party: str,
+                   ttl_s: int = TOKEN_TTL_S) -> str:
+        """Proof that `account`'s owner is signed in, for `audience`, presentable only by
+        the service `party`. Only an issuer the receiver trusts (grants:issue) counts."""
+        now = int(time.time())
+        return jwt.encode(
+            {"typ": GRANT_TYPE, "iss": self.name, "sub": account, "aud": audience,
+             "azp": party, "iat": now, "exp": now + min(ttl_s, MAX_TTL_S),
+             "jti": uuid.uuid4().hex},
             self.key, algorithm="EdDSA", headers={"kid": self.name})
 
 
@@ -180,6 +210,33 @@ class Verifier:
         if not scopes:
             raise AuthError(403, f"{kid} has no access to {self.service}")
         return Principal(kid, scopes)
+
+    def verify_grant(self, token: str, presenter: str) -> str:
+        """The account a user grant is for, if it is valid here and `presenter` may use
+        it. Raises AuthError otherwise."""
+        try:
+            kid = jwt.get_unverified_header(token).get("kid")
+        except jwt.PyJWTError as e:
+            raise AuthError(401, f"malformed grant: {e}") from e
+        key = self.public_keys.get(kid or "")
+        if key is None:
+            raise AuthError(401, f"grant from unknown signer {kid!r}")
+        if GRANT_ISSUE_SCOPE not in self.grants.get(kid, frozenset()):
+            raise AuthError(403, f"{kid} may not issue user grants for {self.service}")
+        try:
+            claims = jwt.decode(token, key, algorithms=["EdDSA"], audience=self.service,
+                                issuer=kid, leeway=LEEWAY_S,
+                                options={"require": ["typ", "iss", "sub", "aud", "azp",
+                                                     "iat", "exp"]})
+        except jwt.PyJWTError as e:
+            raise AuthError(401, f"grant: {type(e).__name__}: {e}") from e
+        if claims["typ"] != GRANT_TYPE:
+            raise AuthError(401, "not a user grant")
+        if claims["exp"] - claims["iat"] > MAX_TTL_S:
+            raise AuthError(401, f"grant lifetime over {MAX_TTL_S} s")
+        if claims["azp"] != presenter:
+            raise AuthError(403, f"grant is for {claims['azp']}, presented by {presenter}")
+        return str(claims["sub"])
 
     def check(self, authorization: str | None, scope: str) -> Principal:
         if not authorization or not authorization.lower().startswith("bearer "):
@@ -319,6 +376,31 @@ class McpGuard:
             log.warning("refused %s: %s lacks %s", self.service, token.client_id, scope)
             raise ToolError(f"forbidden: {token.client_id} lacks scope {scope!r}")
         return token.client_id
+
+    def has(self, scope: str) -> bool:
+        """Whether the current caller holds `scope` (True when auth is off)."""
+        if self.verifier is None:
+            return True
+        from mcp.server.auth.middleware.auth_context import get_access_token
+
+        token = get_access_token()
+        return token is not None and scope in token.scopes
+
+    def granted_account(self, grant: str) -> str:
+        """The account a user grant presented by the current caller is for. ToolError if
+        the grant is missing, forged, expired, or meant for another service."""
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        if self.verifier is None:
+            raise ToolError("user grants need auth enabled")
+        caller = self.caller()
+        if caller is None:
+            raise ToolError("forbidden: unauthenticated")
+        try:
+            return self.verifier.verify_grant(grant, presenter=caller)
+        except AuthError as e:
+            log.warning("refused grant at %s from %s: %s", self.service, caller, e.reason)
+            raise ToolError(f"forbidden: {e.reason}") from e
 
     def caller(self) -> str | None:
         if self.verifier is None:

@@ -61,13 +61,14 @@ def test_order_size_limit_is_separate_from_position_limit():
 
 
 @pytest.fixture
-async def broker(pg_url):
-    s = await BrokerStore.connect(pg_url, BrokerPolicy(max_position_pct=20, max_order_pct=10))
+async def broker(pg_url, broker_url):
+    s = await BrokerStore.connect(broker_url, BrokerPolicy(max_position_pct=20, max_order_pct=10))
     admin = await asyncpg.connect(pg_url)
     # audit_log refuses TRUNCATE by design; tests start from a fresh table instead.
     await admin.execute("""
         ALTER TABLE audit_log DISABLE TRIGGER USER;
-        TRUNCATE fills, cash_ledger, proposals, audit_log, accounts RESTART IDENTITY CASCADE;
+        TRUNCATE fills, cash_ledger, proposals, audit_log, accounts, watchlists,
+            watchlist_accounts RESTART IDENTITY CASCADE;
         ALTER TABLE audit_log ENABLE TRIGGER USER;
         INSERT INTO accounts (account, initial_capital) VALUES ('operator', 1000000);
         INSERT INTO cash_ledger (account, amount, reason)
@@ -187,14 +188,22 @@ class FakeQuotes:
         return 500.0
 
 
-AGENT, DASH = (Identity(n, Ed25519PrivateKey.generate()) for n in ("portfolio-agent", "dashboard"))
-GRANTS = {"portfolio-agent": frozenset({"broker:read", "broker:propose"}),
-          "dashboard": frozenset({"broker:read", "broker:decide", "audit:read"})}
+AGENT, DASH, ADV = (Identity(n, Ed25519PrivateKey.generate())
+                    for n in ("portfolio-agent", "dashboard", "advisor-agent"))
+GRANTS = {"portfolio-agent": frozenset({"broker:read", "broker:propose",
+                                        "accounts:followers"}),
+          "dashboard": frozenset({"broker:read", "broker:decide", "audit:read", "audit:all",
+                                  "grants:issue"}),
+          "advisor-agent": frozenset({"broker:read", "broker:propose"})}
+
+
+def grant(account: str, party: str = "dashboard", by: Identity = DASH, ttl_s: int = 60) -> str:
+    return by.mint_grant(account, "broker", party, ttl_s)
 
 
 @asynccontextmanager
 async def broker_http(store):
-    v = Verifier("broker", {i.name: i.key.public_key() for i in (AGENT, DASH)}, GRANTS)
+    v = Verifier("broker", {i.name: i.key.public_key() for i in (AGENT, DASH, ADV)}, GRANTS)
     server = build_server(store, FakeQuotes(), guard=McpGuard("broker", v))
     app = server.streamable_http_app(
         stateless_http=True, json_response=True,
@@ -211,6 +220,7 @@ def as_(app, ident, allow):
 
 async def test_the_proposer_cannot_approve_and_the_approver_cannot_propose(broker):
     s, _ = broker
+    await s.watch(A, "LUCK")  # the agent may propose to A because A follows LUCK
     async with broker_http(s) as app:
         async with as_(app, AGENT, {"propose_order", "decide"}) as ts:
             p = await ts.call("propose_order", account=A, client_order_id="run:x",
@@ -228,7 +238,7 @@ async def test_the_proposer_cannot_approve_and_the_approver_cannot_propose(broke
                               symbol="LUCK", side="buy", quantity=10, rationale="x" * 20,
                               brief={})
             d = await ts.call("decide", account=A, proposal_id=p["id"], approve=True,
-                              decided_by="saad")
+                              decided_by="saad", grant=grant(A))
     assert d["proposal"]["status"] == "filled"
     assert d["proposal"]["decided_by"] == "dashboard:saad"  # service + the human it vouches for
 
@@ -362,3 +372,123 @@ async def test_batch_marks_older_than_the_limit_count_as_stale(monkeypatch):
 
     monkeypatch.setattr(server, "McpToolset", FakeToolset)
     assert await server.McpQuotes("x").prices(["HBL"]) == {"HBL": None}
+
+
+# ---------------------------------------------------------------- row-level security
+
+
+async def test_postgres_itself_keeps_accounts_apart_even_if_a_query_forgets_to(broker):
+    """Row-level security (migration 0007): the SQL below has no account filter, as a
+    buggy query might. Postgres still returns only the transaction's own account."""
+    s, _ = broker
+    await s.open_account("saad", 1_000_000, "test")
+    await s.watch("saad", "LUCK")
+    await s.watch("operator", "HBL")
+    async with s._as("saad") as conn:
+        assert {r["account"] for r in await conn.fetch("SELECT account FROM watchlists")} \
+            == {"saad"}
+        assert {r["account"] for r in await conn.fetch("SELECT account FROM cash_ledger")} \
+            == {"saad"}
+        assert await conn.fetchval("SELECT count(*) FROM accounts") == 1
+
+
+async def test_an_account_transaction_cannot_write_another_accounts_rows(broker):
+    s, _ = broker
+    await s.open_account("saad", 1_000_000, "test")
+    async with s._as("saad") as conn:
+        # a delete with the wrong account matches nothing: the rows are invisible
+        await conn.execute("DELETE FROM watchlists WHERE account = 'operator'")
+    with pytest.raises(asyncpg.InsufficientPrivilegeError):  # WITH CHECK refuses it
+        async with s._as("saad") as conn:
+            await conn.execute("INSERT INTO cash_ledger (account, amount, reason) "
+                               "VALUES ('operator', 1e9, 'free money')")
+    assert (await s.portfolio("operator", {})).cash == 1_000_000
+
+
+async def test_system_reads_see_every_account_but_cannot_write(broker):
+    s, _ = broker
+    await s.open_account("saad", 1_000_000, "test")
+    async with s._all() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM accounts") == 2
+    with pytest.raises(asyncpg.ReadOnlySQLTransactionError):
+        async with s._all() as conn:
+            await conn.execute("INSERT INTO cash_ledger (account, amount, reason) "
+                               "VALUES ('saad', 5, 'x')")
+
+
+async def test_a_connection_with_no_account_set_sees_nothing(broker):
+    """Fails closed: code that skips _as()/_all() reads empty tables, not everyone's."""
+    s, _ = broker
+    async with s.pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM accounts") == 0
+        assert await conn.fetchval("SELECT count(*) FROM cash_ledger") == 0
+
+
+async def test_an_order_id_used_by_another_account_is_still_refused(broker):
+    s, _ = broker
+    await s.open_account("saad", 1_000_000, "test")
+    await propose(s, key="dup:1")  # operator's
+    with pytest.raises(ValueError, match="already used"):
+        await s.propose(account="saad", client_order_id="dup:1", run_id=None,
+                        proposed_by="t", symbol="LUCK", side=OrderSide.buy, quantity=1,
+                        ref_price=500.0, rationale="r", brief={}, evidence_ids=[],
+                        marks={"LUCK": 500.0})
+
+
+# ---------------------------------------------------------------- user grants (HTTP)
+
+
+async def test_naming_an_account_is_not_enough_the_users_grant_is_required(broker):
+    s, _ = broker
+    await s.open_account("u_b", 1_000_000, "t")
+    async with broker_http(s) as app, as_(app, DASH, {"get_portfolio"}) as ts:
+        with pytest.raises(McpToolError, match="needs that user's grant"):
+            await ts.call("get_portfolio", account=A)
+        assert (await ts.call("get_portfolio", account=A, grant=grant(A)))["cash"] == 1_000_000
+        with pytest.raises(McpToolError, match="grant is for another account"):
+            await ts.call("get_portfolio", account="u_b", grant=grant(A))
+
+
+async def test_a_grant_works_only_for_the_service_it_was_issued_to(broker):
+    """The advisor's chat grant cannot be replayed by the dashboard, nor the other way."""
+    s, _ = broker
+    async with broker_http(s) as app:
+        async with as_(app, ADV, {"get_portfolio"}) as ts:
+            assert await ts.call("get_portfolio", account=A, grant=grant(A, "advisor-agent"))
+            with pytest.raises(McpToolError, match="presented by advisor-agent"):
+                await ts.call("get_portfolio", account=A, grant=grant(A, "dashboard"))
+        async with as_(app, DASH, {"get_portfolio"}) as ts:
+            with pytest.raises(McpToolError, match="presented by dashboard"):
+                await ts.call("get_portfolio", account=A, grant=grant(A, "advisor-agent"))
+
+
+async def test_only_the_dashboard_may_issue_grants_and_they_expire(broker):
+    s, _ = broker
+    async with broker_http(s) as app, as_(app, ADV, {"get_portfolio"}) as ts:
+        # the advisor signing a grant for itself: a valid signature, but not an issuer
+        with pytest.raises(McpToolError, match="may not issue user grants"):
+            await ts.call("get_portfolio", account=A, grant=grant(A, "advisor-agent", by=ADV))
+        with pytest.raises(McpToolError, match="Expired"):
+            await ts.call("get_portfolio", account=A,
+                          grant=grant(A, "advisor-agent", ttl_s=-30))
+        with pytest.raises(McpToolError, match="forbidden"):
+            await ts.call("get_portfolio", account=A, grant="not.a.token")
+
+
+async def test_research_fan_out_reaches_only_accounts_that_follow_the_stock(broker):
+    """The portfolio agent acts with nobody signed in, so it gets no grant. It may read
+    and propose for an account only when that account follows or holds the stock."""
+    s, _ = broker
+    await s.open_account("u_b", 1_000_000, "t")
+    await s.watch("u_b", "HBL")
+    async with broker_http(s) as app, as_(app, AGENT, {"get_portfolio", "propose_order"}) as ts:
+        assert await ts.call("get_portfolio", account="u_b", symbol="HBL")
+        for args in ({}, {"symbol": "LUCK"}):  # no reason given, or a stock u_b ignores
+            with pytest.raises(McpToolError, match="needs that user's grant"):
+                await ts.call("get_portfolio", account="u_b", **args)
+        with pytest.raises(McpToolError, match="needs that user's grant"):
+            await ts.call("propose_order", account="u_b", client_order_id="run:z:u_b",
+                          symbol="LUCK", side="buy", quantity=1, rationale="x" * 20, brief={})
+        p = await ts.call("propose_order", account="u_b", client_order_id="run:z:u_b",
+                          symbol="HBL", side="buy", quantity=1, rationale="x" * 20, brief={})
+    assert p["status"] == "pending"  # still only a suggestion: u_b decides

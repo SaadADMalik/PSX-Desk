@@ -43,14 +43,19 @@ operator = ["memory:read"]
 
 [broker]
 portfolio-agent = ["broker:read", "broker:propose",  # can propose, never execute
-                   "accounts:list"]                  # to whom: who follows or holds the stock
+                   "accounts:list",                  # to whom: who follows or holds the stock
+                   "accounts:followers"]             # acts only for those, no user grant needed
 dashboard = ["broker:read", "broker:decide", "broker:trade", "audit:read",  # the human's hand
              "watchlist:read", "watchlist:write", "alerts:read", "alerts:write",
-             "accounts:open"]                       # a demo account at sign-up
+             "accounts:open",                       # a demo account at sign-up
+             "grants:issue"]                        # vouches for the signed-in user (see below)
 advisor-agent = ["broker:read", "broker:propose",  # suggests; you approve
                  "watchlist:read", "alerts:read"]  # sees your list and alerts; changes neither
 scheduler = ["watchlist:all", "alerts:check"]      # what to research daily; runs the alert checks
-operator = ["broker:read", "audit:read", "watchlist:read", "alerts:read"]
+operator = ["broker:read", "audit:read", "audit:all", "watchlist:read", "alerts:read"]
+# Per-account tools also need the user's grant: a token the dashboard signs when that
+# person is signed in, naming the account and the one service allowed to present it
+# (agentkit.auth). A scope above says what a service may do; the grant says for whom.
 
 # A2A agents: only the orchestrator assigns work.
 [technical-agent]

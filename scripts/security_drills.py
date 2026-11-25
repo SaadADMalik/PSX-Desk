@@ -33,11 +33,13 @@ async def refused_tool(url: str, tool: str, args: dict, expect: str) -> tuple[bo
     try:
         async with McpToolset(url, allow={tool}) as ts:
             await ts.call(tool, **args)
-    except McpToolError as e:
-        return expect in str(e), f"tool refused: {e}"
-    except Exception as e:  # noqa: BLE001  401 at the transport surfaces as an exception group
-        text = repr(e)
-        return True, f"connection refused before any tool ran ({text[:90]}...)"
+    except Exception as e:  # noqa: BLE001
+        # The MCP client's task group wraps errors in an ExceptionGroup: find the cause.
+        while isinstance(e, BaseExceptionGroup) and len(e.exceptions) == 1:
+            e = e.exceptions[0]
+        if isinstance(e, McpToolError):
+            return expect in str(e), f"tool refused: {e}"
+        return True, f"connection refused before any tool ran ({e!r:.90}...)"
     return False, "the call SUCCEEDED"
 
 
@@ -58,8 +60,24 @@ async def as_service(urls: dict) -> None:
                ok, d)
     if me.name == "portfolio-agent":
         async with McpToolset(urls["broker"], allow={"get_portfolio"}) as ts:
-            pf = await ts.call("get_portfolio", account="operator")
-        report("portfolio agent can read the portfolio", True, f"equity {pf['equity']:,.0f}")
+            pf = await ts.call("get_portfolio", account="operator", symbol="LUCK")
+        report("portfolio agent can read the portfolio of an account that follows the "
+               "stock it is sizing", True, f"equity {pf['equity']:,.0f}")
+        ok, d = await refused_tool(urls["broker"], "get_portfolio", {"account": "operator"},
+                                   "needs that user's grant")
+        report("portfolio agent cannot read an account without a reason (no grant, "
+               "no followed stock)", ok, d)
+        ok, d = await refused_tool(urls["broker"], "get_portfolio",
+                                   {"account": "operator", "symbol": "ZZZQ"},
+                                   "needs that user's grant")
+        report("portfolio agent cannot read an account that does not follow the stock",
+               ok, d)
+        me_grant = me.mint_grant("operator", "broker", "portfolio-agent")
+        ok, d = await refused_tool(urls["broker"], "get_portfolio",
+                                   {"account": "operator", "grant": me_grant},
+                                   "may not issue user grants")
+        report("portfolio agent cannot forge a user grant (only the dashboard issues them)",
+               ok, d)
         ok, d = await refused_tool(urls["broker"], "decide",
                                    {"account": "operator",
                                     "proposal_id": "00000000-0000-0000-0000-000000000000",
@@ -108,6 +126,16 @@ async def as_service(urls: dict) -> None:
                                     "approve": True, "decided_by": "me"},
                                    "lacks scope 'broker:decide'")
         report("operator CLI cannot approve trades either: only the dashboard", ok, d)
+        ok, d = await refused_tool(urls["broker"], "get_portfolio", {"account": "operator"},
+                                   "needs that user's grant")
+        report("a service naming an account is not enough: reading it needs that user's "
+               "grant", ok, d)
+        forged = me.mint_grant("operator", "broker", "operator")
+        ok, d = await refused_tool(urls["broker"], "get_portfolio",
+                                   {"account": "operator", "grant": forged},
+                                   "may not issue user grants")
+        report("only the dashboard can issue a user grant (a self-signed one is refused)",
+               ok, d)
 
 
 def main() -> None:

@@ -157,7 +157,11 @@ def _compact_brief(b: dict) -> dict:
     }
 
 
-def build_tools(user: str, used: list[str], proposals: list[str]) -> list[Tool]:
+def build_tools(user: str, used: list[str], proposals: list[str],
+                grant: str | None = None) -> list[Tool]:
+    # Who these tools act for: the account, and the user's grant that proves it to the
+    # broker. The model never sees or chooses either; no tool takes an account.
+    who = {"account": user, **({"grant": grant} if grant else {})}
     def tool(name: str, description: str, props: dict, required: list[str]):
         def wrap(fn):
             async def call(**kw):
@@ -204,10 +208,10 @@ def build_tools(user: str, used: list[str], proposals: list[str]) -> list[Tool]:
     async def my_portfolio():
         async with McpToolset(BROKER, allow={"get_portfolio", "list_proposals",
                                              "list_fills"}) as ts:
-            pf = await ts.call("get_portfolio", account=user)
-            pending = await ts.call("list_proposals", account=user, status="pending",
+            pf = await ts.call("get_portfolio", **who)
+            pending = await ts.call("list_proposals", **who, status="pending",
                                     limit=10)
-            fills = await ts.call("list_fills", account=user, limit=10)
+            fills = await ts.call("list_fills", **who, limit=10)
         return {"portfolio": pf,
                 "pending": [{k: p[k] for k in ("symbol", "side", "quantity", "ref_price",
                                                "proposed_by")} for p in pending],
@@ -218,9 +222,9 @@ def build_tools(user: str, used: list[str], proposals: list[str]) -> list[Tool]:
     async def my_watchlist():
         async with McpToolset(BROKER, allow={"get_watchlist", "list_alerts",
                                              "list_alert_events"}) as ts:
-            symbols = await ts.call("get_watchlist", account=user)
-            alerts = await ts.call("list_alerts", account=user, active_only=True)
-            events = await ts.call("list_alert_events", account=user, limit=10)
+            symbols = await ts.call("get_watchlist", **who)
+            alerts = await ts.call("list_alerts", **who, active_only=True)
+            events = await ts.call("list_alert_events", **who, limit=10)
         return {"watchlist": symbols,
                 "alerts": [{k: a[k] for k in ("symbol", "kind", "threshold", "ref_price",
                                               "ref_basis", "ends_at", "state",
@@ -252,7 +256,7 @@ def build_tools(user: str, used: list[str], proposals: list[str]) -> list[Tool]:
            "reason": {"type": "string", "description": "1-2 sentences"}},
           ["symbol", "side", "quantity", "reason"])
     async def suggest_trade(symbol: str, side: str, quantity: int, reason: str):
-        p = await _mcp(BROKER, "propose_order", account=user,
+        p = await _mcp(BROKER, "propose_order", **who,
                        client_order_id=f"chat:{user}:{uuid.uuid4().hex}",
                        symbol=symbol.upper(), side=side, quantity=int(quantity),
                        rationale=f"Suggested in chat: {reason}"[:1000],
@@ -328,21 +332,26 @@ class Batcher:
             await self.emit({"type": "delta", "text": text})
 
 
-async def user_watchlist(user: str) -> list[str]:
+async def user_watchlist(user: str, grant: str | None = None) -> list[str]:
     """The user's own watchlist, for the prompt. Best effort: the default list if the
     broker cannot be reached."""
     try:
         async with McpToolset(BROKER, allow={"get_watchlist"}) as ts:
-            return await ts.call("get_watchlist", account=user)
+            return await ts.call("get_watchlist", account=user,
+                                 **({"grant": grant} if grant else {}))
     except Exception as e:  # noqa: BLE001
         log.warning("watchlist unavailable: %s", e)
         return WATCHLIST
 
 
 async def chat(payload: dict, emit=None) -> dict:
-    # The account of the signed-in user, vouched for by the dashboard (the only caller
-    # allowed agent:call here). Every account tool below is bound to it.
-    user = str(payload.get("user") or "operator")[:40].lower()
+    # The signed-in user's account and grant, both from the dashboard (the only caller
+    # allowed agent:call here). The broker trusts the grant, not this label: without a
+    # valid one for this account, every account tool below is refused.
+    user = str(payload.get("user") or "")[:40].lower()
+    if not user:
+        raise ValueError("no signed-in user")
+    grant = payload.get("grant") or None
     history, text = _history(payload.get("messages") or [])
     used: list[str] = []
     proposals: list[str] = []
@@ -352,8 +361,8 @@ async def chat(payload: dict, emit=None) -> dict:
         result = await run_agent(
             client,
             system=SYSTEM.format(now=_now(),
-                                 watchlist=", ".join(await user_watchlist(user)) or "empty"),
-            user=text, history=history, tools=build_tools(user, used, proposals),
+                                 watchlist=", ".join(await user_watchlist(user, grant)) or "empty"),
+            user=text, history=history, tools=build_tools(user, used, proposals, grant),
             tier=Tier.large, max_steps=9, token_budget=36_000, max_tokens=1000,
             reasoning_effort="low", on_event=batcher)
         if batcher:
