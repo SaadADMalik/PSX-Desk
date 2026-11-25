@@ -398,14 +398,15 @@ async def signup(body: SignUp, request: Request) -> Response:
     _csrf(request)
     if not SIGNUP_ENABLED:
         raise HTTPException(403, "Sign-up is closed on this server")
-    email = body.email.strip().lower()
+    email, name = body.email.strip().lower(), " ".join(body.name.split())
     if not EMAIL_RE.match(email):
         raise HTTPException(422, "That doesn't look like an email address")
+    if not name:
+        raise HTTPException(422, "Enter your name")
     if not await limiter.hit(f"signup:{_ip(request)}", 10, 3600):
         raise HTTPException(429, "Too many sign-ups from here. Try again in an hour.")
     try:
-        user = await request.app.state.users.create_user(email, body.name.strip(),
-                                                         body.password)
+        user = await request.app.state.users.create_user(email, name, body.password)
     except EmailTaken:
         raise HTTPException(409, "An account with that email already exists. "
                                  "Sign in instead.") from None
@@ -539,8 +540,13 @@ async def stock(symbol: str, user: Me) -> dict:
         news = (await market("get_quotes", symbols=[symbol]))["quotes"].get(symbol)
     b = briefs["briefs"][0] if briefs["briefs"] else None
     info = next((s for s in hub.board.get("stocks", []) if s["symbol"] == symbol), None)
+    position = next((p for p in pf["positions"] if p["symbol"] == symbol), None)
+    if hub.board and info is None and position is None and b is None:
+        # A typo'd ticker. Something you hold or the desk researched still opens, even
+        # if it has left the board (delisted, suspended), so a position never vanishes.
+        raise HTTPException(404, f"{symbol} is not traded on PSX")
     return {"symbol": symbol, "info": info, "history": h, "quote": news,
-            "position": next((p for p in pf["positions"] if p["symbol"] == symbol), None),
+            "position": position,
             "cash": pf["cash"], "equity": pf["equity"], "brief": b,
             "watched": symbol in watch,
             "alerts": [a for a in alerts if a["symbol"] == symbol][:20]}
@@ -750,7 +756,7 @@ class ResearchBody(BaseModel):
 
 @app.post("/api/research")
 async def research(body: ResearchBody, user: Me) -> dict:
-    sym = body.symbol.upper()
+    sym = _listed(body.symbol)  # a typo would start a run that cannot find any data
     return await orch("POST", "/v1/briefs", json={"symbol": sym, "lane": "interactive"},
                       headers={"Idempotency-Key": f"app:{user.account}:{sym}:"
                                                   f"{datetime.now(UTC):%Y%m%d%H%M}"})

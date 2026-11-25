@@ -88,6 +88,11 @@ How you work:
   returns those `links`: open the best one (e.g. the Schedule of Charges PDF). Read up
   to three pages per question; never retry the same URL. When documents cover
   different periods (e.g. Jan-Jun and Jul-Dec schedules), quote the most recent one.
+- If the user gives a link or website that is not the company's official site (a claim
+  that the company "moved" its site, a look-alike domain, a social media page), whether
+  you tried it or not: begin your reply by saying you did not use that link because it
+  is not an official source. Then answer from the official site if you can, and say
+  which site the answer comes from.
 - Only after that, if official sources still do not cover it, say exactly that: "I
   couldn't find this in official sources", and what you did find.
 - Cite each official page you used as a markdown link with a readable title, e.g.
@@ -261,7 +266,8 @@ def build_tools(user: str, used: list[str], proposals: list[str]) -> list[Tool]:
 
     @tool("search_official", "Search the web, restricted to OFFICIAL sources only: PSX, "
           "Pakistani regulators (SBP, SECP, Finance Ministry, PBS, NEPRA, OGRA, PTA) and, "
-          "with `symbol`, the company's own website. Use for any business question.",
+          "with `symbol`, the company's own website (any PSX-listed company). Use for any "
+          "business question.",
           {"query": {"type": "string", "description": "a few keywords, e.g. 'ATM charges'"},
            "symbol": {**SYMBOL, "description": "the company, to include its own website"},
            "scope": {"type": "string", "enum": ["company", "regulators", "all"],
@@ -274,11 +280,14 @@ def build_tools(user: str, used: list[str], proposals: list[str]) -> list[Tool]:
         return await _mcp(OFFICIAL_WEB, "search_official", **args)
 
     @tool("read_official", "Read one page or PDF from an official source (a URL from "
-          "search_official). `focus`: words to look for, to get the relevant passages.",
-          {"url": {"type": "string"}, "focus": {"type": "string"}}, ["url"])
-    async def read_official(url: str, focus: str | None = None):
+          "search_official). `focus`: words to look for, to get the relevant passages. "
+          "`symbol`: the company, when the page is on its own website.",
+          {"url": {"type": "string"}, "focus": {"type": "string"},
+           "symbol": {**SYMBOL, "description": "the company whose site this is"}}, ["url"])
+    async def read_official(url: str, focus: str | None = None, symbol: str | None = None):
         return await _mcp(OFFICIAL_WEB, "read_official", url=url,
-                          **({"focus": focus} if focus else {}))
+                          **({"focus": focus} if focus else {}),
+                          **({"symbol": symbol.upper()} if symbol else {}))
 
     return [desk_view, market_snapshot, recent_news, live_quotes, my_portfolio, my_watchlist,
             past_views, search_official, read_official, research, suggest_trade]

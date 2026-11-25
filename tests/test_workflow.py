@@ -46,6 +46,9 @@ async def store(pg_url):
 EV = Evidence(id="ev_aaa", symbol="LUCK", kind="price_summary", values={"rsi_14": 65.0},
               source="t", as_of="2026-11-14", fetched_at="2026-11-14T00:00:00Z")
 RSI = Claim(text="RSI is 65", evidence_ids=["ev_aaa"])
+NEWS = Evidence(id="ev_news", symbol="LUCK", kind="news",
+                values={"days_since_last": 9, "latest": []}, source="t", as_of="2026-11-14",
+                fetched_at="2026-11-14T00:00:00Z")
 
 
 def brief(risk_text="RSI of 65 could cool off", stance=Stance.bullish):
@@ -56,8 +59,9 @@ def brief(risk_text="RSI of 65 could cool off", stance=Stance.bullish):
 class FakeDesk:
     """Every participant of the workflow, scripted."""
 
-    def __init__(self, failing=(), briefs=None, memory_up=True):
+    def __init__(self, failing=(), briefs=None, memory_up=True, announcements_up=True):
         self.failing = set(failing)
+        self.announcements_up = announcements_up
         self.briefs = list(briefs or [])
         self.memory_up = memory_up
         self.calls: list[str] = []
@@ -77,6 +81,12 @@ class FakeDesk:
 
     async def evidence(self, ids):
         return {i: EV for i in ids if i == EV.id}
+
+    async def announcements(self, symbol):
+        self.calls.append("announcements")
+        if not self.announcements_up:
+            raise ConnectionError("market-data down")
+        return NEWS
 
     async def argue(self, side, req):
         self._maybe_fail(f"{side.value}_case")
@@ -224,6 +234,28 @@ async def test_one_agent_down_still_succeeds_with_the_failure_recorded(store):
     risk = run["result"]["risk"]
     assert "missing_analysis" in {f["rule"] for f in risk["flags"]}
     assert risk["verdict"] == "caution"
+
+
+async def test_news_agent_down_the_gate_still_reads_announcements_itself(store):
+    desk = FakeDesk(failing={"news_analysis"})
+    run = await run_once(store, desk)
+    assert "announcements" in desk.calls  # fetched as data, not analysis
+    assert run["steps"]["announcements"]["status"] == "succeeded"
+    assert "no_announcement_data" not in {f["rule"] for f in run["result"]["risk"]["flags"]}
+    assert run["result"]["risk"]["actionable"] is True and desk.proposed
+
+
+async def test_no_announcement_data_at_all_means_no_trade(store):
+    """News agent down AND the gate's own lookup down: a results day could be hiding
+    there, so the brief is published but cannot become a trade."""
+    desk = FakeDesk(failing={"news_analysis"}, announcements_up=False)
+    run = await run_once(store, desk)
+    assert run["status"] == "succeeded"  # the research is still worth reading
+    risk = run["result"]["risk"]
+    assert ("no_announcement_data", "veto") in {(f["rule"], f["severity"])
+                                                for f in risk["flags"]}
+    assert risk["verdict"] == "veto" and risk["actionable"] is False
+    assert desk.proposed == []  # nothing for anyone to approve
 
 
 async def test_every_specialist_down_parks_the_run_for_later(store):

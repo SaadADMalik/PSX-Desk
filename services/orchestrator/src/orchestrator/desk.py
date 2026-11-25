@@ -81,6 +81,12 @@ class Desk:
             raise AgentFailed("proposal result does not match the request")
         return r
 
+    async def announcements(self, symbol: str) -> Evidence:
+        """The company's recent announcements, straight from market-data: what the risk
+        gate needs even when the news agent could not run."""
+        async with McpToolset(self.market_data_url, allow={"get_announcements"}) as ts:
+            return Evidence.model_validate(await ts.call("get_announcements", symbol=symbol))
+
     async def evidence(self, ids: list[str]) -> dict[str, Evidence]:
         """From the service that computed it, never from what agents passed along."""
         out: dict[str, Evidence] = {}

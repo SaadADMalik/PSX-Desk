@@ -302,3 +302,48 @@ def test_live_events_go_only_to_the_account_they_concern():
     b = [qb.get_nowait() for _ in range(qb.qsize())]
     assert a == ["portfolio"]
     assert [m["type"] for m in b] == ["alert"] and b[0]["data"]["kind"] == "triggered"
+
+
+async def test_a_blank_or_spaced_out_name_is_handled_not_a_server_error(dash):
+    d, _, _ = dash
+    async with client(d) as c:
+        r = await signup(c, name="    ")
+        assert r.status_code == 422 and r.json()["detail"] == "Enter your name"
+        r = await signup(c, email="b@example.com", name="  Ayesha   Khan ")
+        assert r.status_code == 200 and r.json()["name"] == "Ayesha Khan"
+
+
+async def test_a_typo_ticker_is_not_researched_and_has_no_stock_page(dash, monkeypatch):
+    d, _, _ = dash
+    monkeypatch.setattr(d.hub, "board", {"stocks": [{"symbol": "LUCK", "name": "Lucky"}]})
+    started = []
+
+    async def fake_orch(method, path, **kw):
+        if path == "/v1/briefs":
+            started.append(kw["json"]["symbol"])
+            return {"run_id": "r1", "created": True}
+        return {"briefs": []}
+
+    async def fake_broker(tool, **args):
+        if tool == "get_portfolio":
+            return {"positions": held, "cash": 1.0, "equity": 1.0}
+        return [] if tool in ("list_alerts", "get_watchlist") else True
+
+    async def no_history(symbol, days):
+        return None
+
+    held = []
+    monkeypatch.setattr(d, "orch", fake_orch)
+    monkeypatch.setattr(d, "broker", fake_broker)
+    monkeypatch.setattr(d, "history", no_history)
+    async with client(d) as c:
+        await signup(c)
+        r = await c.post("/api/research", json={"symbol": "ZZZQ"}, headers=H)
+        assert r.status_code == 404 and started == []  # no run that can never find data
+        r = await c.post("/api/research", json={"symbol": "luck"}, headers=H)
+        assert r.status_code == 200 and started == ["LUCK"]
+        assert (await c.get("/api/stocks/ZZZQ")).status_code == 404
+        assert (await c.get("/api/stocks/LUCK")).status_code == 200
+        held.append({"symbol": "OLDCO", "quantity": 5, "avg_cost": 10.0})
+        # held but no longer on the board (delisted): the page still opens
+        assert (await c.get("/api/stocks/OLDCO")).status_code == 200

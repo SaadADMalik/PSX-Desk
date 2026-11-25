@@ -21,6 +21,9 @@ NEWS = Evidence(id="ev_aaaaaaaaaaaa", symbol="HBL", kind="news", source="t",
                     "latest": [{"date": "2026-11-16", "category": "material_information",
                                 "title": "Financial Results for the Quarter Ended 2026-09-30"}]})
 EV = {e.id: e for e in (PRICE, VALUATION, NEWS)}
+# announcements were read, and nothing new in the last fortnight
+QUIET = NEWS.model_copy(update={"id": "ev_bbbbbbbbbbbb", "values": {
+    **NEWS.values, "days_since_last": 14, "latest": []}})
 
 
 def claim(text, *ids):
@@ -104,13 +107,13 @@ def gate(b=None, evidence=None, **kw):
 
 
 def test_clean_brief_passes_and_is_actionable():
-    b, risk = gate(evidence={PRICE.id: PRICE, VALUATION.id: VALUATION})
+    b, risk = gate(evidence={PRICE.id: PRICE, VALUATION.id: VALUATION, QUIET.id: QUIET})
     assert risk.verdict == "pass" and risk.actionable and b.confidence == 0.7
 
 
 def test_illiquid_stock_is_vetoed():
     thin = PRICE.model_copy(update={"values": {**PRICE.values, "avg_volume_20d": 12_000}})
-    _, risk = gate(evidence={thin.id: thin})
+    _, risk = gate(evidence={thin.id: thin, QUIET.id: QUIET})
     assert risk.verdict == "veto" and not risk.actionable
     assert [f.rule for f in risk.flags if f.severity == "veto"] == ["illiquid"]
 
@@ -118,7 +121,7 @@ def test_illiquid_stock_is_vetoed():
 def test_cautions_cap_confidence():
     wild = PRICE.model_copy(update={"values": {**PRICE.values,
                                                "volatility_60d_annualised_pct": 72.0}})
-    b, risk = gate(evidence={wild.id: wild}, failures={"news_analysis": "down"})
+    b, risk = gate(evidence={wild.id: wild, QUIET.id: QUIET}, failures={"news_analysis": "down"})
     assert risk.verdict == "caution" and b.confidence == 0.6 and risk.confidence_before == 0.7
     assert {f.rule for f in risk.flags} >= {"high_volatility", "missing_analysis"}
 
@@ -134,6 +137,12 @@ def test_fresh_material_announcement_is_a_caution():
     assert "fresh_announcement" in {f.rule for f in risk.flags} and b.confidence == 0.6
     _, risk = gate(policy=RiskPolicy(recent_announcement_days=-1))
     assert "fresh_announcement" not in {f.rule for f in risk.flags}
+
+
+def test_announcements_that_could_not_be_read_veto_the_trade():
+    _, risk = gate(evidence={PRICE.id: PRICE, VALUATION.id: VALUATION})
+    assert risk.verdict == "veto" and not risk.actionable
+    assert [f.rule for f in risk.flags if f.severity == "veto"] == ["no_announcement_data"]
 
 
 def test_neutral_or_unconfident_briefs_are_never_actionable():

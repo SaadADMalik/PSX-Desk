@@ -200,3 +200,65 @@ async def test_a_page_returns_its_official_document_links_best_first():
     assert p["links"][0]["url"] == "https://www.meezanbank.com/downloads/SOC-ENG-Jul-Dec-2026.pdf"
     assert all("tracker.example" not in link["url"] for link in p["links"])
     assert all("careers" not in link["url"] for link in p["links"])
+
+
+# ------------------------------------------------- any PSX company, via its PSX profile
+
+def profile(website):
+    link = f'<div class="title">WEBSITE</div> <p> <a href="{website}" target="_blank">' \
+        if website else ""
+    return (200, {"content-type": "text/html"},
+            (f"<title>Stock quote for TRG Pakistan Limited - Pakistan Stock Exchange</title>"
+             f"{link}</p>").encode())
+
+
+def fresh_server(fetch, search=None):
+    src = Sources.load(Path(__file__).resolve().parents[1] / "config" / "official_sources.toml")
+    return src, build_server(src, searcher=search or FakeSearch(), fetcher=fetch,
+                             throttle=Throttle(n=100))
+
+
+async def test_a_company_not_on_file_gets_the_website_psx_lists_for_it():
+    fetch = FakeFetch({
+        "https://dps.psx.com.pk/company/TRG": profile("http://www.trg.com.pk"),
+        "http://www.trg.com.pk": (301, {"location": "https://www.trg.com.pk/"}, b""),
+        "https://www.trg.com.pk/": (301, {"location": "https://trggroup.com/"}, b""),
+        "https://trggroup.com/": (200, {}, b"home"),
+    })
+    src, srv = fresh_server(fetch)
+    assert src.official("https://www.trg.com.pk/investors") is None  # not before asked
+    async with Client(srv) as c:
+        r = (await c.call_tool("search_official", {"query": "annual report", "symbol": "TRG",
+                                                   "scope": "company"})).structured_content
+        assert r["searched"] == ["trg.com.pk", "psx.com.pk"]
+        assert "TRG Pakistan Limited" in r["note"] and "PSX lists" in r["note"]
+        await c.call_tool("search_official", {"query": "dividend", "symbol": "TRG"})
+    assert fetch.fetched.count("https://dps.psx.com.pk/company/TRG") == 1  # cached
+    assert src.official("https://www.trg.com.pk/investors") == "trg.com.pk"
+    assert src.official("https://trggroup.com/ir") == "trggroup.com"  # its own redirect
+
+
+@pytest.mark.parametrize("website", ["https://www.facebook.com/somecompany",
+                                     "http://203.0.113.5", "http://user@x.com.pk",
+                                     "https://somecompany.blogspot.com", "http://com.pk", None])
+async def test_a_listed_link_that_is_not_a_company_site_is_not_trusted(website):
+    fetch = FakeFetch({"https://dps.psx.com.pk/company/ABC": profile(website)})
+    src, srv = fresh_server(fetch)
+    async with Client(srv) as c:
+        r = (await c.call_tool("search_official", {"query": "results", "symbol": "ABC",
+                                                   "scope": "company"})).structured_content
+    assert r["searched"] == ["psx.com.pk"] and "PSX lists no website" in r["note"]
+    assert src.listed == {}
+
+
+async def test_read_official_with_a_symbol_can_read_that_companys_site():
+    page = (200, {"content-type": "text/html"}, b"<p>Board approved a final dividend</p>")
+    fetch = FakeFetch({"https://dps.psx.com.pk/company/TRG": profile("www.trg.com.pk"),
+                       "https://www.trg.com.pk/news": page})
+    _, srv = fresh_server(fetch)
+    async with Client(srv) as c:
+        refused = await c.call_tool("read_official", {"url": "https://www.trg.com.pk/news"})
+        assert refused.is_error  # an unknown site is still refused without the symbol
+        r = (await c.call_tool("read_official", {"url": "https://www.trg.com.pk/news",
+                                                 "symbol": "trg"})).structured_content
+    assert "dividend" in str(r)

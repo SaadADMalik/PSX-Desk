@@ -61,7 +61,12 @@ def assess(brief: Brief, evidence: dict[str, Evidence], *, failures: dict[str, s
                  f"{policy.max_drawdown_pct}%", policy.cap_caution)
 
     news = by_kind.get("news")
-    if news is not None:
+    if news is None:
+        # Not "no news": unknown news. A results announcement or a material event today
+        # would change the case, so nothing is traded until announcements can be read.
+        flag("no_announcement_data", "veto", "the company's recent announcements could not "
+             "be checked; a trade needs them")
+    else:
         fresh = [i for i in news.values.get("latest", [])
                  if i.get("category") in {"material_information", "financial_results"}
                  and news.values.get("days_since_last") is not None

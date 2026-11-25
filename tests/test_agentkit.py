@@ -50,6 +50,23 @@ async def test_unknown_tool_and_bad_args_are_reported_to_the_model():
     assert "unknown tool" in errors[0] and "invalid arguments" in errors[1]
 
 
+async def test_a_refused_tool_call_tells_the_model_why_not_a_wrapper_message():
+    """MCP errors raised inside the client's context arrive wrapped in an ExceptionGroup.
+    The model must see the server's reason, or it retries the same blocked call."""
+    from agentkit.mcp_tools import McpToolError
+
+    async def blocked(url: str):
+        raise ExceptionGroup("unhandled errors in a TaskGroup", [McpToolError(
+            "Error executing tool read: not an official source: 'evil.example'")])
+
+    client = FakeClient([answer(calls=[call("read", {"url": "https://evil.example"})]),
+                         answer("ok")])
+    await run_agent(client, system="s", user="u",
+                    tools=[Tool("read", "read", {"type": "object", "properties": {}}, blocked)])
+    err = json.loads(client.seen[1][-1].content)["error"]
+    assert err == "McpToolError: not an official source: 'evil.example'"
+
+
 async def test_step_cap_stops_a_looping_model():
     loop_forever = [answer(calls=[call("echo", {"symbol": "X"})]) for _ in range(3)]
     with pytest.raises(AgentLimitExceeded):
