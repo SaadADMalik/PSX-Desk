@@ -44,6 +44,15 @@ export async function mockApi(page: Page, opts: MockOptions = {}) {
     if (path === "/api/market") return json(route, market)
     if (path === "/api/system") return json(route, opts.system ?? system)
     if (path === "/api/portfolio") return json(route, portfolio)
+    if (path.startsWith("/api/watchlist/")) return json(route, { watchlist: [] })
+    if (path === "/api/alerts" && req.method() === "POST") {
+      const b = body as { symbol: string; kind: string; threshold: number; days: number | null }
+      return json(route, { id: "00000000-0000-4000-8000-000000000001", account: "operator",
+        symbol: b.symbol, kind: b.kind, threshold: b.threshold, ref_price: 304, ref_basis: "price_when_set",
+        starts_at: new Date().toISOString(), ends_at: null, state: "armed", status: "active",
+        last_price: null, last_checked_at: null, times_triggered: 0, created_by: "operator",
+        created_at: new Date().toISOString() })
+    }
     if (path === "/api/stocks/HBL") return json(route, stockHBL)
     if (path.startsWith("/api/stocks/")) return json(route, { detail: "unknown symbol" }, 404)
     if (path === "/api/chat/stream") {

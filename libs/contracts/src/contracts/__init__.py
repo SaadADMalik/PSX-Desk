@@ -19,6 +19,9 @@ from contracts.llm import (
 )
 from contracts.review import ClaimCheck, RiskAssessment, RiskFlag, Verification
 from contracts.trading import (
+    AlertEvent,
+    AlertKind,
+    AlertRule,
     Check,
     Decision,
     Fill,
@@ -33,6 +36,9 @@ from contracts.trading import (
 )
 
 __all__ = [
+    "AlertEvent",
+    "AlertKind",
+    "AlertRule",
     "AnalysisReport",
     "AnalysisRequest",
     "Brief",

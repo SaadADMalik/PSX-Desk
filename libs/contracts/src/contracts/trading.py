@@ -118,3 +118,46 @@ class ProposeTradeResult(BaseModel):
     quantity: int = 0
     reason: str
     tokens_used: int = 0
+
+
+# ---------------------------------------------------------------- watchlists and alerts
+
+
+class AlertKind(StrEnum):
+    pct = "pct"  # the price falls this many percent below the reference
+    pkr = "pkr"  # the position loses this many rupees against the reference
+
+
+class AlertRule(BaseModel):
+    """A user's price alert. It fires once when the drop crosses the threshold, and
+    re-arms only after the price recovers past 80% of it (hysteresis)."""
+
+    schema_version: Literal["alert_rule.v1"] = "alert_rule.v1"
+    id: str
+    account: str
+    symbol: str
+    kind: AlertKind
+    threshold: float
+    ref_price: float = Field(description="the price the drop is measured from")
+    ref_basis: Literal["avg_cost", "price_when_set"]
+    starts_at: str
+    ends_at: str | None = Field(description="None: watches until cancelled")
+    state: Literal["armed", "triggered"]
+    status: Literal["active", "expired", "cancelled", "ended"]
+    last_price: float | None = None
+    last_checked_at: str | None = None
+    times_triggered: int = 0
+    created_by: str
+    created_at: str
+
+
+class AlertEvent(BaseModel):
+    id: int
+    rule_id: str
+    account: str
+    symbol: str
+    kind: Literal["triggered", "rearmed"]
+    price: float
+    drop_pct: float
+    loss_pkr: float | None = None
+    at: str

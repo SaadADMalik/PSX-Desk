@@ -3,7 +3,7 @@
 import { useDeferredValue, useMemo, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { ArrowDown, ArrowUp, ChevronsUpDown, Search, Star, X } from "lucide-react"
+import { ArrowDown, ArrowUp, ChevronsUpDown, Search, X } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -12,6 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Change, LivePrice } from "@/components/desk"
+import { WatchButton } from "@/components/watch-button"
 import { highlightParts, searchStocks, tradedValue, useMarket } from "@/lib/market"
 import { ago, compact, num, pct } from "@/lib/format"
 import { cn } from "@/lib/utils"
@@ -144,7 +145,8 @@ export default function StocksPage() {
                         <div className="flex items-center gap-1.5">
                           <Link href={`/stocks/${s.symbol}`} className="font-semibold hover:text-primary" onClick={(e) => e.stopPropagation()}>
                             <Hl text={s.symbol} q={q} /></Link>
-                          {watch.has(s.symbol) && <Star className="size-3 fill-amber-400 text-amber-400" />}
+                          <span onClick={(e) => e.stopPropagation()}>
+                            <WatchButton symbol={s.symbol} watched={watch.has(s.symbol)} iconOnly ghost /></span>
                           {s.etf && <Badge variant="outline" className="h-4 px-1 text-[10px]">ETF</Badge>}
                           {s.ex && <Badge variant="outline" className="h-4 px-1 text-[10px]" title="Ex-dividend / bonus / rights period">{s.ex}</Badge>}
                         </div>

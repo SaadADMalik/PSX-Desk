@@ -50,14 +50,18 @@ MARKET_DATA = os.getenv("MARKET_DATA_MCP_URL", "http://127.0.0.1:8300/mcp")
 ORCHESTRATOR = os.getenv("ORCHESTRATOR_URL", "http://127.0.0.1:8200")
 GATEWAY = os.getenv("LLM_GATEWAY_URL", "http://127.0.0.1:8100")
 ADVISOR = os.getenv("ADVISOR_URL", "http://127.0.0.1:8406")
-WATCHLIST = [s.strip() for s in os.getenv("WATCHLIST", "LUCK,ENGRO,HBL").split(",") if s.strip()]
+# A new user's starting watchlist. After that, each user's list lives in the broker.
+DEFAULT_WATCHLIST = [s.strip().upper() for s in os.getenv("WATCHLIST", "LUCK,ENGRO,HBL").split(",")
+                     if s.strip()]
 USER = os.getenv("DASHBOARD_USER", "operator")
 SESSION_S = 8 * 3600
 COOKIE = "desk_session"
 PKT = ZoneInfo("Asia/Karachi")
 INITIAL_CAPITAL = 1_000_000.0
 BROKER_TOOLS = {"get_portfolio", "list_proposals", "get_proposal", "list_fills", "decide",
-                "place_order", "audit_log", "verify_audit"}
+                "place_order", "audit_log", "verify_audit", "get_watchlist", "init_watchlist",
+                "watch", "unwatch", "list_alerts", "list_alert_events", "create_alert",
+                "cancel_alert"}
 
 
 # ---------------------------------------------------------------- sessions
@@ -109,14 +113,25 @@ def current_user(request: Request) -> str:
 # ---------------------------------------------------------------- backends
 
 
+async def _call(url: str, tool: str, args: dict):
+    # A tool error raised inside the client's context comes out wrapped in an
+    # ExceptionGroup by its task group; keep it and raise it plainly after closing.
+    failed: McpToolError | None = None
+    async with McpToolset(url, allow={tool}) as ts:
+        try:
+            return await ts.call(tool, **args)
+        except McpToolError as e:
+            # show the server's reason, not the protocol's "Error executing tool x:"
+            failed = McpToolError(str(e).removeprefix(f"Error executing tool {tool}: "))
+    raise failed
+
+
 async def broker(tool: str, **args):
-    async with McpToolset(BROKER, allow={tool}) as ts:
-        return await ts.call(tool, **args)
+    return await _call(BROKER, tool, args)
 
 
 async def market(tool: str, **args):
-    async with McpToolset(MARKET_DATA, allow={tool}) as ts:
-        return await ts.call(tool, **args)
+    return await _call(MARKET_DATA, tool, args)
 
 
 async def orch(method: str, path: str, **kw) -> dict:
@@ -150,6 +165,15 @@ async def history(symbol: str, days: int) -> dict | None:
     return h
 
 
+def account(user: str) -> str:
+    """The broker's account key for a signed-in user."""
+    return user.lower()
+
+
+async def watchlist_of(user: str) -> list[str]:
+    return await broker("get_watchlist", account=account(user))
+
+
 def market_open(now: datetime | None = None) -> bool:
     t = (now or datetime.now(UTC)).astimezone(PKT)
     return t.weekday() < 5 and (9, 30) <= (t.hour, t.minute) < (15, 30)
@@ -162,13 +186,16 @@ class Hub:
     """Fan-out of live events to every open browser tab (Server-Sent Events)."""
 
     def __init__(self) -> None:
-        self.clients: set[asyncio.Queue] = set()
+        self.clients: dict[asyncio.Queue, str] = {}  # queue -> the signed-in account
         self.quotes: dict = {}
         self.board: dict = {}
 
-    def publish(self, kind: str, data: dict) -> None:
+    def publish(self, kind: str, data: dict, account: str | None = None) -> None:
+        """To every open tab, or only to `account`'s tabs (an alert is one user's)."""
         msg = {"type": kind, "data": data, "at": datetime.now(UTC).isoformat()}
-        for q in list(self.clients):
+        for q, owner in list(self.clients.items()):
+            if account is not None and owner != account:
+                continue
             if q.qsize() < 100:
                 q.put_nowait(msg)
 
@@ -208,8 +235,10 @@ class Hub:
                 await asyncio.sleep(5)
 
     async def broker_loop(self) -> None:
-        """The broker publishes no events, so watch it: cheap reads, every 4 s."""
+        """The broker publishes no events, so watch it: cheap reads, every 4 s. New
+        alert events go to the browser as "alert" (a notification), once each."""
         seen = None
+        last_alert: int | None = None
         while True:
             try:
                 props = await broker("list_proposals", limit=20)
@@ -220,6 +249,11 @@ class Hub:
                     self.publish("portfolio", {"pending": sum(p["status"] == "pending"
                                                               for p in props)})
                 seen = digest
+                events = await broker("list_alert_events", account=account(USER), limit=10)
+                if last_alert is not None:
+                    for ev in reversed([e for e in events if e["id"] > last_alert]):
+                        self.publish("alert", ev, account=ev["account"])
+                last_alert = max([e["id"] for e in events], default=last_alert or 0)
             except Exception as e:  # noqa: BLE001
                 log.warning("broker watch failed: %s", e)
             await asyncio.sleep(4)
@@ -232,10 +266,27 @@ async def warm_sparklines() -> None:
     """Keep the watchlist's 30-day closes cached, so Today never waits on a cold PSX fetch
     (about 13 s per symbol through the rate-limited data server)."""
     while True:
-        for sym in WATCHLIST:
+        try:
+            symbols = await watchlist_of(USER)
+        except Exception as e:  # noqa: BLE001
+            log.warning("watchlist unavailable: %s", e)
+            symbols = DEFAULT_WATCHLIST
+        for sym in symbols:
             _history_cache.pop((sym, 30), None)
             await history(sym, 30)
         await asyncio.sleep(540)  # just inside the 10-minute cache window
+
+
+async def seed_watchlist() -> None:
+    """Give the operator account its starting watchlist once (retrying while the broker
+    starts). The broker ignores this for an account that already has one."""
+    for _ in range(30):
+        try:
+            await broker("init_watchlist", account=account(USER), symbols=DEFAULT_WATCHLIST)
+            return
+        except Exception as e:  # noqa: BLE001
+            log.warning("watchlist seed failed, retrying: %s", e)
+            await asyncio.sleep(10)
 
 
 @asynccontextmanager
@@ -244,7 +295,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     redis = Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"),
                            decode_responses=True, socket_timeout=30)
     app.state.advisor = AgentDirectory([ADVISOR], timeout_s=180)
-    tasks = [asyncio.create_task(hub.quotes_loop()), asyncio.create_task(hub.briefs_loop(redis)),
+    tasks = [asyncio.create_task(seed_watchlist()),
+             asyncio.create_task(hub.quotes_loop()), asyncio.create_task(hub.briefs_loop(redis)),
              asyncio.create_task(hub.broker_loop()), asyncio.create_task(warm_sparklines())]
     yield
     for t in tasks:
@@ -301,7 +353,7 @@ async def logout() -> Response:
 
 @app.get("/api/me")
 async def me(user: str = Depends(current_user)) -> dict:
-    return {"user": user, "watchlist": WATCHLIST, "market_open": market_open()}
+    return {"user": user, "watchlist": await watchlist_of(user), "market_open": market_open()}
 
 
 # ---------------------------------------------------------------- reads
@@ -319,21 +371,29 @@ def _desk_summary(b: dict | None) -> dict | None:
 
 @app.get("/api/overview")
 async def overview(user: str = Depends(current_user)) -> dict:
-    briefs, pf, pending = await asyncio.gather(
-        orch("GET", "/v1/briefs/latest", params={"symbols": ",".join(WATCHLIST)}),
-        broker("get_portfolio"), broker("list_proposals", status="pending", limit=20))
+    watch = await watchlist_of(user)
+
+    async def latest() -> dict:
+        if not watch:
+            return {"briefs": []}
+        return await orch("GET", "/v1/briefs/latest", params={"symbols": ",".join(watch)})
+
+    briefs, pf, pending, alerts, fired = await asyncio.gather(
+        latest(), broker("get_portfolio"), broker("list_proposals", status="pending", limit=20),
+        broker("list_alerts", account=account(user), active_only=True),
+        broker("list_alert_events", account=account(user), limit=5))
     by_symbol = {b["symbol"]: b for b in briefs["briefs"]}
     quotes = (hub.quotes or {}).get("quotes", {})
-    sparks = await asyncio.gather(*(history(s, 30) for s in WATCHLIST))
+    sparks = await asyncio.gather(*(history(s, 30) for s in watch))
     rows = []
-    for sym, h in zip(WATCHLIST, sparks, strict=True):
+    for sym, h in zip(watch, sparks, strict=True):
         q = quotes.get(sym) or {}
         rows.append({"symbol": sym, "price": q.get("price"), "change_pct": q.get("change_pct"),
                      "spark": [p["close"] for p in (h or {}).get("points", [])],
                      "desk": _desk_summary(by_symbol.get(sym))})
     return {"user": user, "market_open": market_open(), "quotes_at": hub.quotes.get("fetched_at"),
-            "watchlist": rows, "portfolio": pf, "pending": pending,
-            "initial_capital": INITIAL_CAPITAL}
+            "watchlist": rows, "portfolio": pf, "pending": pending, "alerts": alerts,
+            "alert_events": fired, "initial_capital": INITIAL_CAPITAL}
 
 
 @app.get("/api/market")
@@ -344,7 +404,7 @@ async def market_board(user: str = Depends(current_user)) -> dict:
         await hub.refresh_board()
     if not hub.board:
         raise HTTPException(503, "PSX market data is unavailable right now")
-    return {**hub.board, "market_open": market_open(), "watchlist": WATCHLIST}
+    return {**hub.board, "market_open": market_open(), "watchlist": await watchlist_of(user)}
 
 
 @app.get("/api/stocks/{symbol}")
@@ -352,9 +412,10 @@ async def stock(symbol: str, user: str = Depends(current_user)) -> dict:
     symbol = symbol.upper()
     if not symbol.isalnum() or len(symbol) > 12:
         raise HTTPException(400, "not a PSX ticker")
-    briefs, h, pf = await asyncio.gather(
+    briefs, h, pf, watch, alerts = await asyncio.gather(
         orch("GET", "/v1/briefs/latest", params={"symbols": symbol}),
-        history(symbol, 365), broker("get_portfolio"))
+        history(symbol, 365), broker("get_portfolio"), watchlist_of(user),
+        broker("list_alerts", account=account(user)))
     news = None
     with contextlib.suppress(Exception):
         news = (await market("get_quotes", symbols=[symbol]))["quotes"].get(symbol)
@@ -362,7 +423,9 @@ async def stock(symbol: str, user: str = Depends(current_user)) -> dict:
     info = next((s for s in hub.board.get("stocks", []) if s["symbol"] == symbol), None)
     return {"symbol": symbol, "info": info, "history": h, "quote": news,
             "position": next((p for p in pf["positions"] if p["symbol"] == symbol), None),
-            "cash": pf["cash"], "equity": pf["equity"], "brief": b}
+            "cash": pf["cash"], "equity": pf["equity"], "brief": b,
+            "watched": symbol in watch,
+            "alerts": [a for a in alerts if a["symbol"] == symbol][:20]}
 
 
 @app.get("/api/portfolio")
@@ -495,6 +558,74 @@ async def trade(body: TradeBody, user: str = Depends(current_user)) -> dict:
         raise HTTPException(409, str(e)) from e
 
 
+def _ticker(symbol: str) -> str:
+    symbol = symbol.upper()
+    if not symbol.isalnum() or len(symbol) > 12:
+        raise HTTPException(400, "not a PSX ticker")
+    return symbol
+
+
+def _listed(symbol: str) -> str:
+    """A ticker that trades on PSX today (checked against the live board)."""
+    symbol = _ticker(symbol)
+    if hub.board and symbol not in {s["symbol"] for s in hub.board.get("stocks", [])}:
+        raise HTTPException(404, f"{symbol} is not traded on PSX")
+    return symbol
+
+
+@app.get("/api/watchlist")
+async def get_watchlist(user: str = Depends(current_user)) -> dict:
+    return {"watchlist": await watchlist_of(user)}
+
+
+@app.put("/api/watchlist/{symbol}")
+async def add_to_watchlist(symbol: str, user: str = Depends(current_user)) -> dict:
+    try:
+        symbols = await broker("watch", account=account(user), symbol=_listed(symbol))
+    except McpToolError as e:
+        raise HTTPException(409, str(e)) from e
+    return {"watchlist": symbols}
+
+
+@app.delete("/api/watchlist/{symbol}")
+async def remove_from_watchlist(symbol: str, user: str = Depends(current_user)) -> dict:
+    return {"watchlist": await broker("unwatch", account=account(user), symbol=_ticker(symbol))}
+
+
+class AlertBody(BaseModel):
+    symbol: str = Field(pattern=r"^[A-Za-z0-9]{1,12}$")
+    kind: str = Field(pattern=r"^(pct|pkr)$")  # % below the reference, or Rs lost
+    threshold: float = Field(gt=0, le=1_000_000_000)
+    days: int | None = Field(default=None, ge=1, le=3650)  # None: until cancelled
+
+
+@app.get("/api/alerts")
+async def list_alerts(user: str = Depends(current_user)) -> dict:
+    rules, events = await asyncio.gather(
+        broker("list_alerts", account=account(user)),
+        broker("list_alert_events", account=account(user), limit=50))
+    return {"alerts": rules, "events": events}
+
+
+@app.post("/api/alerts")
+async def create_alert(body: AlertBody, user: str = Depends(current_user)) -> dict:
+    try:
+        return await broker("create_alert", account=account(user), symbol=_listed(body.symbol),
+                            kind=body.kind, threshold=body.threshold, days=body.days,
+                            created_by=account(user))
+    except McpToolError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@app.delete("/api/alerts/{alert_id}")
+async def cancel_alert(alert_id: uuid.UUID, user: str = Depends(current_user)) -> dict:
+    try:
+        return await broker("cancel_alert", account=account(user), alert_id=str(alert_id),
+                            cancelled_by=account(user))
+    except McpToolError as e:
+        raise HTTPException(404, str(e)) from e
+
+
 class ResearchBody(BaseModel):
     symbol: str = Field(pattern=r"^[A-Za-z0-9]{1,12}$")
 
@@ -559,7 +690,7 @@ async def chat_stream(body: ChatBody, request: Request,
 @app.get("/api/events")
 async def events(request: Request, user: str = Depends(current_user)) -> StreamingResponse:
     q: asyncio.Queue = asyncio.Queue()
-    hub.clients.add(q)
+    hub.clients[q] = account(user)
 
     async def stream():
         try:
@@ -573,7 +704,7 @@ async def events(request: Request, user: str = Depends(current_user)) -> Streami
                 except TimeoutError:
                     yield ": keep-alive\n\n"
         finally:
-            hub.clients.discard(q)
+            hub.clients.pop(q, None)
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

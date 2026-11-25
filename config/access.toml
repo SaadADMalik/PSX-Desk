@@ -43,9 +43,12 @@ operator = ["memory:read"]
 
 [broker]
 portfolio-agent = ["broker:read", "broker:propose"]   # can propose, never execute
-dashboard = ["broker:read", "broker:decide", "broker:trade", "audit:read"]  # the human's hand
-advisor-agent = ["broker:read", "broker:propose"]  # suggests; you approve
-operator = ["broker:read", "audit:read"]
+dashboard = ["broker:read", "broker:decide", "broker:trade", "audit:read",  # the human's hand
+             "watchlist:read", "watchlist:write", "alerts:read", "alerts:write"]
+advisor-agent = ["broker:read", "broker:propose",  # suggests; you approve
+                 "watchlist:read", "alerts:read"]  # sees your list and alerts; changes neither
+scheduler = ["watchlist:all", "alerts:check"]      # what to research daily; runs the alert checks
+operator = ["broker:read", "audit:read", "watchlist:read", "alerts:read"]
 
 # A2A agents: only the orchestrator assigns work.
 [technical-agent]

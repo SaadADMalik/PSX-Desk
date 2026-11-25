@@ -5,15 +5,17 @@ import Link from "next/link"
 import { useParams } from "next/navigation"
 import useSWR from "swr"
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
-import { ArrowLeft, CheckCircle2, ThumbsDown, ThumbsUp, TriangleAlert } from "lucide-react"
+import { ArrowLeft, BellPlus, CheckCircle2, ThumbsDown, ThumbsUp, TriangleAlert } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Change, ConfidenceMeter, LivePrice, RiskBadge, StanceBadge } from "@/components/desk"
+import { AlertDialog, AlertList } from "@/components/price-alerts"
 import { ResearchButton } from "@/components/research-button"
 import { TradeDialog } from "@/components/trade-dialog"
+import { WatchButton } from "@/components/watch-button"
 import { useLive } from "@/lib/live"
 import { ago, money, num, pct, price, tone } from "@/lib/format"
 import type { StockData } from "@/lib/types"
@@ -82,7 +84,10 @@ function StockView() {
             <span className="text-xs text-muted-foreground">today</span>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <WatchButton symbol={sym} watched={data.watched} />
+          <AlertDialog symbol={sym} position={pos} livePrice={last}
+                       trigger={<Button size="sm" variant="outline"><BellPlus />Set alert</Button>} />
           <ResearchButton symbol={sym} />
           <TradeDialog symbol={sym} held={pos?.quantity ?? 0} cash={data.cash}
                        trigger={<Button size="sm">Trade with demo money</Button>} />
@@ -147,6 +152,10 @@ function StockView() {
                 <Row k="Share of account" v={pct(pos.weight_pct, false)} />
               </>
             ) : <p className="text-muted-foreground">You don&apos;t hold {sym}. Cash available: {money(data.cash)}.</p>}
+            <div className="space-y-1 border-t pt-3">
+              <div className="text-xs font-medium text-muted-foreground">Price alerts</div>
+              <AlertList alerts={data.alerts.filter((a) => a.status === "active")} />
+            </div>
           </CardContent>
         </Card>
       </div>
